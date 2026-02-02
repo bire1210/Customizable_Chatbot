@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: ankane/pgvector
+    environment:
+      POSTGRES_DB: chatbot
+      POSTGRES_USER: chatbot_user
+      POSTGRES_PASSWORD: chatbot_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data  # <-- this should persist your DB
+    restart: unless-stopped
+
+volumes:
+  pgdata:
