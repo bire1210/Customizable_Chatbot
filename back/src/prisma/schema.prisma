@@ -17,7 +17,7 @@ datasource db {
 model User {
   id       String  @id @default(uuid())
   email    String  @unique
-  password String? // optional for public users
+  password String // optional for public users
   name     String? // optional for personalization
   role     Role
 }
