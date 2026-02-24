@@ -2,6 +2,7 @@ import {
 	BadRequestException,
 	Body,
 	Controller,
+	Delete,
 	Get,
 	Param,
 	Post,
@@ -85,6 +86,17 @@ export class DocumentsController {
 	async getDocumentChunks(@Param('id') id: string) {
 		return this.documentsService.getDocumentChunks(id);
 	}
+
+	@Delete(':id')
+	@ApiOperation({ summary: 'Delete a document and its chunks' })
+	@ApiParam({ name: 'id', example: 'uuid' })
+	@ApiOkResponse({
+		description: 'Document deleted successfully',
+	})
+	async deleteDocument(@Param('id') id: string) {
+		return this.documentsService.deleteDocument(id);
+	}
+	
 }
 
 function buildMulterOptions() {

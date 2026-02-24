@@ -4,6 +4,7 @@ import { VectorService } from './vector.service';
 
 @Module({
   controllers: [VectorController],
-  providers: [VectorService]
+  providers: [VectorService],
+  exports: [VectorService],
 })
 export class VectorModule {}

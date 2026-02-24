@@ -5,10 +5,13 @@ import { extname, join } from 'path';
 import { extractTextFromHtml } from './text-extractors/htmls';
 import { extractTextFromMarkdown } from './text-extractors/markdown';
 import { extractTextFromPdf } from './text-extractors/pdf';
+import { VectorService } from 'src/vector/vector.service';
 
 @Injectable()
 export class DocumentsService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(private readonly prisma: PrismaService, 
+      private readonly vectorService: VectorService
+    ) {}
 
   async createAndIngestDocument(params: {
     file: Express.Multer.File;
@@ -56,21 +59,21 @@ export class DocumentsService {
       throw new Error('No chunks generated from document');
     }
 
-    const embeddings = await embedMany(chunks);
+    const embeddings = await this.vectorService.createBatchEmbeddings(chunks);
 
-    if (chunks.length !== embeddings.length) {
+    if (chunks.length !== embeddings?.length) {
+      console.log('Chunks:', chunks.length, 'Embeddings:', embeddings?.length ?? 0, embeddings);
       throw new Error('Chunks and embeddings count mismatch');
     }
 
     await this.prisma.$executeRawUnsafe(`
-        INSERT INTO "DocumentChunk" (id, "documentId", content, embedding)
-        VALUES ${chunks
-            .map(
-            (_, i) =>
-                `('${crypto.randomUUID()}', '${documentId}', $${i * 2 + 1}, $${i * 2 + 2})`
-            )
-            .join(',')}
-        `, ...chunks.flatMap((content, i) => [content, embeddings[i]]));
+      INSERT INTO "DocumentChunk" (id, "documentId", content, embedding)
+      VALUES ${chunks
+        .map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i * 2 + 1}, $${i * 2 + 2}::float8[])`)
+        .join(',')}
+      `,
+      ...chunks.flatMap((content, i) => [content, formatVector(embeddings[i])])
+    );
     }
 
     async getDocuments() {
@@ -114,7 +117,17 @@ export class DocumentsService {
 
       throw new BadRequestException(`Unsupported file type: ${extension || 'unknown'}`);
     }
+    async deleteDocument(id: string) {
+      await this.prisma.documentChunk.deleteMany({
+        where: { documentId: id },
+      });
+    
+      await this.prisma.document.delete({
+        where: { id },
+      });
+    }
 }
+
 
 function chunkText(text: string, chunkSize = 500, overlap = 100) {
   const words = normalizeWhitespace(text).split(' ');
@@ -137,4 +150,7 @@ async function embedMany(chunks: string[]): Promise<number[][]> {
   // Placeholder embeddings to keep the pipeline working until a real model is wired up.
   const dimension = 1536;
   return chunks.map(() => Array.from({ length: dimension }, () => 0));
+}
+function formatVector(embedding: number[]) {
+  return `{${embedding.join(',')}}`;
 }
