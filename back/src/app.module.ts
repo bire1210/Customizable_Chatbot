@@ -9,6 +9,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { SeedModule } from './seed/seed.module';
 import { DocumentsModule } from './documents/documents.module';
 import { VectorModule } from './vector/vector.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { VectorModule } from './vector/vector.module';
     SeedModule,
     DocumentsModule,
     VectorModule,
+    ChatModule,
   ],
   controllers: [AppController],
   providers: [AppService],
