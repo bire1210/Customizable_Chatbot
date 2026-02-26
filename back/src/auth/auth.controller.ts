@@ -13,8 +13,8 @@ export class AuthController {
     return this.authService.signIn(data);
   }
 
-  @Post('register')
-  async register(@Body() data: RegisterDto) {
-    return this.authService.register(data);
-  }
+  // @Post('register')
+  // async register(@Body() data: RegisterDto) {
+  //   return this.authService.register(data);
+  // }
 }
