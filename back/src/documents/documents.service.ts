@@ -62,7 +62,6 @@ export class DocumentsService {
     const embeddings = await this.vectorService.createBatchEmbeddings(chunks);
 
     if (chunks.length !== embeddings?.length) {
-      console.log('Chunks:', chunks.length, 'Embeddings:', embeddings?.length ?? 0, embeddings);
       throw new Error('Chunks and embeddings count mismatch');
     }
 

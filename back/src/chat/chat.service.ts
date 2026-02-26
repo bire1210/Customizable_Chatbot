@@ -12,7 +12,6 @@ export class ChatService {
     constructor(private vector: VectorService, private document: DocumentsService) {}
 
     async handleMessage(userMessage: string) {
-        console.log("here")
         // embed the message into vector
         const generatedMessageVector = await this.vector.createSingleTextVector(userMessage);
 
@@ -40,7 +39,6 @@ export class ChatService {
                         prompt: prompt,
                         stream: false,
                     });
-        console.log(response)
 
         return response.data.response as string;
         // return ollamas response based on the message and relevant chunks
