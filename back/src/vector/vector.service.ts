@@ -4,8 +4,6 @@ import { PrismaService } from 'src/prisma/prisma.service';
 
 @Injectable()
 export class VectorService {
-    private readonly ollama_url = 'http://localhost:11434/api/embeddings';
-    private readonly ollama_batch_url = 'http://localhost:11434/api/embed';
     private readonly model_name = 'nomic-embed-text';
     private readonly targetDimension = 1536;
 
@@ -14,10 +12,11 @@ export class VectorService {
 
     async createSingleTextVector(text: string) {
         try{
-            const response = await axios.post(this.ollama_url, {
+            const response = await axios.post('http://localhost:11434/api/embeddings', {
                 model: this.model_name,
                 prompt: text,
             });
+
             const vector = response.data?.embedding as number[] | undefined;
 
             if (!Array.isArray(vector) || !vector.length) {
@@ -34,7 +33,7 @@ export class VectorService {
 
     async createBatchEmbeddings(texts: string[]) {
         try{
-            const response = await axios.post(this.ollama_batch_url, {
+            const response = await axios.post('http://localhost:11434/api/embed', {
                 model: this.model_name,
                 input: texts,
             });

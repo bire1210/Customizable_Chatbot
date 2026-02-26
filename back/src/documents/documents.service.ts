@@ -53,7 +53,7 @@ export class DocumentsService {
   }) {
     const { documentId, rawText } = params;
 
-    const chunks = chunkText(rawText);
+    const chunks = this.chunkText(rawText);
 
     if (!chunks.length) {
       throw new Error('No chunks generated from document');
@@ -126,20 +126,45 @@ export class DocumentsService {
         where: { id },
       });
     }
-}
 
+    async searchSimilarChunks(
+      queryEmbedding: number[],
+      limit = 5,
+    ) {
+      const vector = formatVector(queryEmbedding)
 
-function chunkText(text: string, chunkSize = 500, overlap = 100) {
-  const words = normalizeWhitespace(text).split(' ');
-  const chunks: string[] = [];
+      const result = await this.prisma.$queryRawUnsafe<
+        { id: string; content: string; documentId: string; distance: number }[]
+      >(
+        `
+        SELECT 
+          id,
+          content,
+          "documentId",
+          embedding <=> $1::vector AS distance
+        FROM "DocumentChunk"
+        ORDER BY embedding <=> $1::vector
+        LIMIT $2
+        `,
+        vector,
+        limit,
+      )
 
-  let i = 0;
-  while (i < words.length) {
-    chunks.push(words.slice(i, i + chunkSize).join(' '));
-    i += chunkSize - overlap;
+      return result
+    }
+
+  chunkText(text: string, chunkSize = 500, overlap = 100) {
+    const words = normalizeWhitespace(text).split(' ');
+    const chunks: string[] = [];
+
+    let i = 0;
+    while (i < words.length) {
+      chunks.push(words.slice(i, i + chunkSize).join(' '));
+      i += chunkSize - overlap;
+    }
+
+    return chunks;
   }
-
-  return chunks;
 }
 
 function normalizeWhitespace(text: string) {
@@ -152,5 +177,5 @@ async function embedMany(chunks: string[]): Promise<number[][]> {
   return chunks.map(() => Array.from({ length: dimension }, () => 0));
 }
 function formatVector(embedding: number[]) {
-  return `{${embedding.join(',')}}`;
+  return `[${embedding.join(',')}]`;
 }
