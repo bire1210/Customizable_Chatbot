@@ -1,10 +1,21 @@
-import { MessageBody, SubscribeMessage, WebSocketGateway } from "@nestjs/websockets";
+import { WebSocketGateway, WebSocketServer, SubscribeMessage, MessageBody, OnGatewayConnection } from '@nestjs/websockets';
+import { ChatService } from './chat.service';
+import { Server, Socket } from 'socket.io';
 
-@WebSocketGateway({cors: { origin: '*' }, transports: ['websocket'] })
-export class chatGateway {
+@WebSocketGateway({ cors: { origin: '*' } })
+export class ChatGateway {
+  constructor(private chat: ChatService) {}
 
-    @SubscribeMessage('events')
-    handleEvent(@MessageBody() data: string): string {
-    return data;
-}
+  @WebSocketServer()
+  server: Server;
+
+  handleConnection(client: WebSocket) {
+    console.log('Client connected');
+  }
+
+  @SubscribeMessage('chat')
+  async handleChat(@MessageBody() data: string) {
+    const response = await this.chat.handleMessage(data);
+    return response;
+  }
 }
