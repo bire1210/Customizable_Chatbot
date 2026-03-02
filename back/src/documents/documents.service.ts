@@ -53,7 +53,7 @@ export class DocumentsService {
   }) {
     const { documentId, rawText } = params;
 
-    const chunks = chunkText(rawText);
+    const chunks = this.chunkText(rawText);
 
     if (!chunks.length) {
       throw new Error('No chunks generated from document');
@@ -62,17 +62,13 @@ export class DocumentsService {
     const embeddings = await this.vectorService.createBatchEmbeddings(chunks);
 
     if (chunks.length !== embeddings?.length) {
-      console.log('Chunks:', chunks.length, 'Embeddings:', embeddings?.length ?? 0, embeddings);
       throw new Error('Chunks and embeddings count mismatch');
     }
 
-    await this.prisma.$executeRawUnsafe(`
-      INSERT INTO "DocumentChunk" (id, "documentId", content, embedding)
-      VALUES ${chunks
-        .map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i * 2 + 1}, $${i * 2 + 2}::float8[])`)
-        .join(',')}
-      `,
-      ...chunks.flatMap((content, i) => [content, formatVector(embeddings[i])])
+    const valuePlaceholders = chunks.map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i + 1}, '${formatVector(embeddings[i])}'::vector)`).join(',');
+    await this.prisma.$executeRawUnsafe(
+      `INSERT INTO "DocumentChunk" (id, "documentId", content, embedding) VALUES ${valuePlaceholders}`,
+      ...chunks,
     );
     }
 
@@ -126,20 +122,45 @@ export class DocumentsService {
         where: { id },
       });
     }
-}
 
+    async searchSimilarChunks(
+      queryEmbedding: number[],
+      limit = 5,
+    ) {
+      const vector = formatVector(queryEmbedding)
 
-function chunkText(text: string, chunkSize = 500, overlap = 100) {
-  const words = normalizeWhitespace(text).split(' ');
-  const chunks: string[] = [];
+      const result = await this.prisma.$queryRawUnsafe<
+        { id: string; content: string; documentId: string; distance: number }[]
+      >(
+        `
+        SELECT 
+          id,
+          content,
+          "documentId",
+          embedding <=> $1::vector AS distance
+        FROM "DocumentChunk"
+        ORDER BY embedding <=> $1::vector
+        LIMIT $2
+        `,
+        vector,
+        limit,
+      )
 
-  let i = 0;
-  while (i < words.length) {
-    chunks.push(words.slice(i, i + chunkSize).join(' '));
-    i += chunkSize - overlap;
+      return result
+    }
+
+  chunkText(text: string, chunkSize = 500, overlap = 100) {
+    const words = normalizeWhitespace(text).split(' ');
+    const chunks: string[] = [];
+
+    let i = 0;
+    while (i < words.length) {
+      chunks.push(words.slice(i, i + chunkSize).join(' '));
+      i += chunkSize - overlap;
+    }
+
+    return chunks;
   }
-
-  return chunks;
 }
 
 function normalizeWhitespace(text: string) {
@@ -152,5 +173,5 @@ async function embedMany(chunks: string[]): Promise<number[][]> {
   return chunks.map(() => Array.from({ length: dimension }, () => 0));
 }
 function formatVector(embedding: number[]) {
-  return `{${embedding.join(',')}}`;
+  return `[${embedding.join(',')}]`;
 }

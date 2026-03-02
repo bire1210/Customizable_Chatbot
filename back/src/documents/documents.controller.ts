@@ -8,7 +8,11 @@ import {
 	Post,
 	UploadedFile,
 	UseInterceptors,
+	UseGuards,
 } from '@nestjs/common';
+import { JwtAuthGuard } from '../../src/auth/jwt-auth.guard';
+import { RolesGuard } from '../../src/common/guards/roles.guard';
+import { Roles } from '../../src/common/decorators/roles.decorator';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { DocumentsService } from './documents.service';
@@ -17,6 +21,8 @@ import { existsSync, mkdirSync } from 'fs';
 import { ApiBadRequestResponse, ApiBody, ApiConsumes, ApiCreatedResponse, ApiOkResponse, ApiOperation, ApiParam } from '@nestjs/swagger';
 import { DocumentChunkDto, DocumentDto } from './Dtos/documents.dtos';
 
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('ADMIN')
 @Controller('documents')
 export class DocumentsController {
 	constructor(private readonly documentsService: DocumentsService) {}

@@ -7,6 +7,7 @@ import { VectorModule } from 'src/vector/vector.module';
 @Module({
   imports: [PrismaModule, VectorModule],
   controllers: [DocumentsController],
-  providers: [DocumentsService]
+  providers: [DocumentsService],
+  exports: [DocumentsService]
 })
 export class DocumentsModule {}
