@@ -65,13 +65,10 @@ export class DocumentsService {
       throw new Error('Chunks and embeddings count mismatch');
     }
 
-    await this.prisma.$executeRawUnsafe(`
-      INSERT INTO "DocumentChunk" (id, "documentId", content, embedding)
-      VALUES ${chunks
-        .map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i * 2 + 1}, $${i * 2 + 2}::float8[])`)
-        .join(',')}
-      `,
-      ...chunks.flatMap((content, i) => [content, formatVector(embeddings[i])])
+    const valuePlaceholders = chunks.map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i + 1}, '${formatVector(embeddings[i])}'::vector)`).join(',');
+    await this.prisma.$executeRawUnsafe(
+      `INSERT INTO "DocumentChunk" (id, "documentId", content, embedding) VALUES ${valuePlaceholders}`,
+      ...chunks,
     );
     }
 
