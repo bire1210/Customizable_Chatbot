@@ -4,11 +4,11 @@ import { ChatService } from './chat.service';
 import { VectorModule } from 'src/vector/vector.module';
 import { DocumentsModule } from 'src/documents/documents.module';
 import { ChatGateway } from './chat.gateway';
+import { PrismaModule } from 'src/prisma/prisma.module';
 
 @Module({
-  imports: [VectorModule, DocumentsModule],
+  imports: [PrismaModule, VectorModule, DocumentsModule],
   controllers: [ChatController],
   providers: [ChatService, ChatGateway],
-  // exports: [ChatService]
 })
 export class ChatModule {}

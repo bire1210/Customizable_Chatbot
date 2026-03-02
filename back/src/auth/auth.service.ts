@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { PrismaService } from 'src/prisma/prisma.service';
+import { PrismaService } from '../../src/prisma/prisma.service';
 import { RegisterDto } from './Dtos/register.dto';
 import * as bcrypt from 'bcrypt';
 
@@ -28,7 +28,7 @@ export class AuthService {
     const { password, ...result } = user;
 
     // sign token
-    const token = await this.jwtService.signAsync({ username: user.email, sub: user.id });
+    const token = await this.jwtService.signAsync({ username: user.email, sub: user.id, role: user.role });
     result['access_token'] = token;
     return result;
     }

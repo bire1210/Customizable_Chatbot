@@ -66,4 +66,31 @@ export class VectorService {
         }
         return padded;
     }
+
+    async searchSimilarVectors(embedding: number[], topK = 5) {
+        const vector = formatVector(embedding);
+
+        const result = await this.prisma.$queryRawUnsafe<
+            { id: string; content: string; documentId: string; distance: number }[]
+        >(
+            `
+            SELECT
+              id,
+              content,
+              "documentId",
+              embedding <=> $1::vector AS distance
+            FROM "DocumentChunk"
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+            `,
+            vector,
+            topK,
+        );
+
+        return result;
+    }
+}
+
+function formatVector(embedding: number[]) {
+    return `[${embedding.join(',')}]`;
 }
