@@ -65,6 +65,10 @@ export class DocumentsService {
       throw new Error('Chunks and embeddings count mismatch');
     }
 
+    if (embeddings.some(e => e.length !== 768)) {
+      throw new Error('Invalid embedding dimension detected');
+    }
+
     const valuePlaceholders = chunks.map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i + 1}, '${formatVector(embeddings[i])}'::vector)`).join(',');
     await this.prisma.$executeRawUnsafe(
       `INSERT INTO "DocumentChunk" (id, "documentId", content, embedding) VALUES ${valuePlaceholders}`,
@@ -167,11 +171,6 @@ function normalizeWhitespace(text: string) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-async function embedMany(chunks: string[]): Promise<number[][]> {
-  // Placeholder embeddings to keep the pipeline working until a real model is wired up.
-  const dimension = 1536;
-  return chunks.map(() => Array.from({ length: dimension }, () => 0));
-}
 function formatVector(embedding: number[]) {
   return `[${embedding.join(',')}]`;
 }

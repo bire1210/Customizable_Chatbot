@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { ChatService } from './chat.service';
 import { ChatRequestDto } from './Dtos/chat-request.dto';
 import { CreateSessionDto } from './Dtos/create-session.dto';
@@ -25,5 +25,21 @@ export class ChatController {
     async message(@Body() body: ChatRequestDto) {
         const resp = await this.chatService.handleUserMessage(body.sessionToken, body.message);
         return resp;
+    }
+
+    @Public()
+    @Get('session/:sessionToken')
+    @ApiOperation({ summary: 'Get chat session details' })
+    async getSession(@Param('sessionToken') sessionToken: string) {
+        const session = await this.chatService.getOrCreateSession(sessionToken);
+        return { sessionToken: session.sessionToken, title: session.title };
+    }
+
+    @Public()
+    @Get('messages/:sessionToken')
+    @ApiOperation({ summary: 'Get messages for a specific session' })
+    async getMessages(@Param('sessionToken') sessionToken: string) {
+        const messages = await this.chatService.getMessages(sessionToken);
+        return { messages };
     }
 }

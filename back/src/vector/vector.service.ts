@@ -5,7 +5,6 @@ import { PrismaService } from 'src/prisma/prisma.service';
 @Injectable()
 export class VectorService {
     private readonly model_name = 'nomic-embed-text';
-    private readonly targetDimension = 1536;
 
     constructor(private prisma: PrismaService) {}
     
@@ -23,7 +22,9 @@ export class VectorService {
                 throw new InternalServerErrorException('Ollama returned empty embedding for single text');
             }
 
-            return this.normalizeEmbeddingDimensions(vector);
+            console.log(vector.length);
+
+            return vector;
         }
         catch(error: unknown){
             const message = error instanceof Error ? error.message : 'Unknown error';
@@ -43,7 +44,9 @@ export class VectorService {
                 throw new InternalServerErrorException('Ollama returned empty embeddings array');
             }
 
-            return embeddings.map((embedding) => this.normalizeEmbeddingDimensions(embedding));
+            console.log(embeddings.length);
+
+            return embeddings;
         }
         catch(error: unknown){
             const message = error instanceof Error ? error.message : 'Unknown error';
@@ -51,21 +54,6 @@ export class VectorService {
         }
     }
 
-    private normalizeEmbeddingDimensions(embedding: number[]) {
-        if (embedding.length === this.targetDimension) {
-            return embedding;
-        }
-
-        if (embedding.length > this.targetDimension) {
-            return embedding.slice(0, this.targetDimension);
-        }
-
-        const padded = [...embedding];
-        while (padded.length < this.targetDimension) {
-            padded.push(0);
-        }
-        return padded;
-    }
 
     async searchSimilarVectors(embedding: number[], topK = 5) {
         const vector = formatVector(embedding);
