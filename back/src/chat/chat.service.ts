@@ -4,6 +4,7 @@ import { VectorService } from 'src/vector/vector.service';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { ChatResponseDto } from './Dtos/chat-response.dto';
 import crypto from 'crypto';
+import { Readable } from 'stream';
 
 @Injectable()
 export class ChatService {
@@ -40,19 +41,16 @@ export class ChatService {
         });
     }
 
-    async handleUserMessage(sessionToken: string | undefined, userMessage: string): Promise<ChatResponseDto> {
+    private async buildPromptAndContext(sessionToken: string | undefined, userMessage: string) {
         const session = await this.getOrCreateSession(sessionToken);
 
-        // persist user message
         await this.storeMessage(session.id, 'USER', userMessage);
 
-        // embed and search
         const embedding = await this.vector.createSingleTextVector(userMessage);
         const topChunks = await this.vector.searchSimilarVectors(embedding, 5);
 
         const contextText = topChunks.map((c) => c.content).join('\n\n');
 
-        // assemble prompt using full session history
         const history = await (this.prisma as any).chatMessage.findMany({
             where: { sessionId: session.id },
             orderBy: { createdAt: 'asc' },
@@ -64,27 +62,12 @@ export class ChatService {
 
         const prompt = `You are an assistant. Answer using only the provided context when possible.\n\nConversation:\n${conversation}\n\nContext:\n${contextText}\n\nUser: ${userMessage}\nAssistant:`;
 
-        let replyText = '';
-        try {
-            const resp = await axios.post(this.generate_url, {
-                model: this.model_name,
-                prompt,
-                stream: false,
-            });
+        return { session, topChunks, prompt };
+    }
 
+    private async persistAssistantAndBuildResponse(sessionId: string, replyText: string, topChunks: any[]): Promise<ChatResponseDto> {
+        const assistantMsg = await this.storeMessage(sessionId, 'ASSISTANT', String(replyText));
 
-            // Ollama responses vary; try common fields
-            replyText = resp.data?.response ?? resp.data?.output ?? JSON.stringify(resp.data);
-
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : 'Unknown error';
-            throw new InternalServerErrorException(`LLM generation failed: ${message}`);
-        }
-
-        // persist assistant message
-        const assistantMsg = await this.storeMessage(session.id, 'ASSISTANT', String(replyText));
-
-        // persist citations for top chunks
         for (const chunk of topChunks) {
             await (this.prisma as any).chatCitation.create({
                 data: {
@@ -96,11 +79,99 @@ export class ChatService {
             });
         }
 
-        const response: ChatResponseDto = {
+        return {
             reply: String(replyText),
             citations: topChunks.map((c) => ({ documentId: c.documentId, chunkId: c.id, score: c.distance })),
         };
+    }
 
-        return response;
+    private async streamGenerate(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
+        let replyText = '';
+
+        try {
+            const resp = await axios.post(this.generate_url, {
+                model: this.model_name,
+                prompt,
+                stream: true,
+            }, {
+                responseType: 'stream',
+            });
+
+            const stream = resp.data as Readable;
+            let buffer = '';
+
+            await new Promise<void>((resolve, reject) => {
+                stream.on('data', (chunk: Buffer | string) => {
+                    buffer += chunk.toString();
+
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() ?? '';
+
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed) continue;
+
+                        try {
+                            const parsed = JSON.parse(trimmed);
+                            const token = parsed?.response ?? '';
+
+                            if (token) {
+                                replyText += token;
+                                if (onChunk) onChunk(token);
+                            }
+                        } catch {
+                            // Ignore malformed partial JSON chunks.
+                        }
+                    }
+                });
+
+                stream.on('end', () => {
+                    const trimmed = buffer.trim();
+
+                    if (trimmed) {
+                        try {
+                            const parsed = JSON.parse(trimmed);
+                            const token = parsed?.response ?? '';
+
+                            if (token) {
+                                replyText += token;
+                                if (onChunk) onChunk(token);
+                            }
+                        } catch {
+                            // Ignore trailing malformed JSON.
+                        }
+                    }
+
+                    resolve();
+                });
+
+                stream.on('error', (err: Error) => reject(err));
+            });
+
+            return replyText;
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : 'Unknown error';
+            throw new InternalServerErrorException(`LLM generation failed: ${message}`);
+        }
+    }
+
+    async handleUserMessageStream(
+        sessionToken: string | undefined,
+        userMessage: string,
+        onChunk?: (chunk: string) => void,
+    ): Promise<{ sessionToken: string; response: ChatResponseDto }> {
+        const { session, topChunks, prompt } = await this.buildPromptAndContext(sessionToken, userMessage);
+        const replyText = await this.streamGenerate(prompt, onChunk);
+        const response = await this.persistAssistantAndBuildResponse(session.id, replyText, topChunks);
+
+        return {
+            sessionToken: session.sessionToken,
+            response,
+        };
+    }
+
+    async handleUserMessage(sessionToken: string | undefined, userMessage: string): Promise<ChatResponseDto> {
+        const streamResult = await this.handleUserMessageStream(sessionToken, userMessage);
+        return streamResult.response;
     }
 }
