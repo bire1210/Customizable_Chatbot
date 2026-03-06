@@ -45,11 +45,31 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
     console.log(`received 'chat' from ${client.id}`, { sessionToken, message });
 
-    const response = await this.chat.handleUserMessage(sessionToken, message);
+    try {
+      this.sendResponse(client, 'chat-start', { sessionToken: sessionToken ?? null });
 
-    this.sendResponse(client, 'chat-response', response);
+      const result = await this.chat.handleUserMessageStream(
+        sessionToken,
+        message,
+        (chunk: string) => {
+          this.sendResponse(client, 'chat-chunk', { chunk });
+        },
+      );
 
-    return { event: 'chat-response', data: response };
+      this.sendResponse(client, 'chat-end', {
+        sessionToken: result.sessionToken,
+        ...result.response,
+      });
+
+      // Keep compatibility for clients listening to the old event.
+      this.sendResponse(client, 'chat-response', result.response);
+
+      return { event: 'chat-end', data: { sessionToken: result.sessionToken, ...result.response } };
+    } catch (error: unknown) {
+      const messageText = error instanceof Error ? error.message : 'Unknown streaming error';
+      this.sendResponse(client, 'chat-error', { message: messageText });
+      return { event: 'chat-error', data: { message: messageText } };
+    }
   }
 
   private sendResponse(client: Socket, event: string, payload: any) {
