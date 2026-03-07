@@ -10,6 +10,10 @@ import { Readable } from 'stream';
 export class ChatService {
     private readonly generate_url = 'http://localhost:11434/api/generate';
     private readonly model_name = 'phi4-mini';
+    private readonly topK = 5;
+    private readonly historyWindow = 10;
+    private readonly maxContextChars = 9000;
+    private readonly minSimilarity = 0.6;
 
     constructor(
         private vector: VectorService,
@@ -47,20 +51,38 @@ export class ChatService {
         await this.storeMessage(session.id, 'USER', userMessage);
 
         const embedding = await this.vector.createSingleTextVector(userMessage);
-        const topChunks = await this.vector.searchSimilarVectors(embedding, 5);
+        const topChunks = await this.vector.searchHybridChunks(userMessage, embedding, this.topK, 20);
+        const reliableChunks = topChunks.filter((chunk) => chunk.similarity >= this.minSimilarity);
+        const chunksForContext = reliableChunks.length ? reliableChunks : topChunks.slice(0, 2);
+        const expandedContexts = await this.expandContexts(chunksForContext, 1);
 
-        const contextText = topChunks.map((c) => c.content).join('\n\n');
+        const contextText = expandedContexts.length
+            ? this.limitContext(
+            expandedContexts
+                  .map((item) => {
+                      const similarity = item.similarity.toFixed(3);
+                      return `[document=${item.documentId} chunk=${item.chunkIndex} similarity=${similarity}]\n${item.content}`;
+                  })
+                  .join('\n\n---\n\n'),
+              )
+            : 'No reliable context was retrieved from the knowledge base.';
+
+        const contextHeader = reliableChunks.length
+            ? ''
+            : 'Context quality is low. Use only what is explicitly supported by the retrieved excerpts.\n\n';
 
         const history = await (this.prisma as any).chatMessage.findMany({
             where: { sessionId: session.id },
-            orderBy: { createdAt: 'asc' },
+            orderBy: { createdAt: 'desc' },
+            take: this.historyWindow,
         });
 
         const conversation = history
+            .reverse()
             .map((m) => `${m.role}: ${m.content}`)
             .join('\n');
 
-        const prompt = `You are an assistant. Answer using only the provided context when possible.\n\nConversation:\n${conversation}\n\nContext:\n${contextText}\n\nUser: ${userMessage}\nAssistant:`;
+        const prompt = `You are an assistant. Answer using only the provided context when possible. If context is insufficient, say you do not know and ask for a more specific source. Keep the answer concise and avoid repetition.\n\nConversation:\n${conversation}\n\nContext:\n${contextHeader}${contextText}\n\nUser: ${userMessage}\nAssistant:`;
 
         return { session, topChunks, prompt };
     }
@@ -73,7 +95,7 @@ export class ChatService {
                 data: {
                     messageId: assistantMsg.id,
                     documentChunkId: chunk.id,
-                    score: chunk.distance ?? 0,
+                    score: chunk.similarity ?? 0,
                     documentId: chunk.documentId,
                 },
             });
@@ -81,8 +103,117 @@ export class ChatService {
 
         return {
             reply: String(replyText),
-            citations: topChunks.map((c) => ({ documentId: c.documentId, chunkId: c.id, score: c.distance })),
+            citations: topChunks.map((c) => ({
+                documentId: c.documentId,
+                chunkId: c.id,
+                score: c.similarity,
+                distance: c.distance,
+                chunkIndex: c.chunkIndex,
+            })),
         };
+    }
+
+    private async expandContexts(topChunks: any[], window = 1) {
+        if (!topChunks.length) {
+            return [];
+        }
+
+        const grouped = new Map<string, { start: number; end: number; similarity: number; chunkIndex: number }[]>();
+
+        for (const chunk of topChunks) {
+            const ranges = grouped.get(chunk.documentId) ?? [];
+            ranges.push({
+                start: Math.max(0, chunk.chunkIndex - window),
+                end: chunk.chunkIndex + window,
+                similarity: chunk.similarity,
+                chunkIndex: chunk.chunkIndex,
+            });
+            grouped.set(chunk.documentId, ranges);
+        }
+
+        const contextBlocks: any[] = [];
+
+        for (const [documentId, ranges] of grouped.entries()) {
+            const mergedRanges = this.mergeRanges(ranges);
+
+            for (const range of mergedRanges) {
+                const neighbors = await this.prisma.$queryRawUnsafe<any[]>(
+                    `
+                    SELECT id, content, "documentId", "chunkIndex"
+                    FROM "DocumentChunk"
+                    WHERE "documentId" = $1
+                      AND "chunkIndex" BETWEEN $2 AND $3
+                    ORDER BY "chunkIndex" ASC
+                    `,
+                    documentId,
+                    range.start,
+                    range.end,
+                );
+
+                if (!neighbors.length) {
+                    continue;
+                }
+
+                contextBlocks.push({
+                    id: neighbors[0].id,
+                    documentId,
+                    chunkIndex: range.chunkIndex,
+                    distance: 1 - range.similarity,
+                    similarity: range.similarity,
+                    content: neighbors.map((row) => row.content).join('\n\n'),
+                });
+            }
+        }
+
+        const deduped = new Map<string, any>();
+        for (const block of contextBlocks) {
+            const key = `${block.documentId}:${block.content}`;
+            const existing = deduped.get(key);
+            if (!existing || existing.similarity < block.similarity) {
+                deduped.set(key, block);
+            }
+        }
+
+        return [...deduped.values()].sort((a, b) => b.similarity - a.similarity).slice(0, this.topK);
+    }
+
+    private mergeRanges(
+        ranges: Array<{ start: number; end: number; similarity: number; chunkIndex: number }>,
+    ) {
+        const sorted = [...ranges].sort((a, b) => a.start - b.start);
+        if (!sorted.length) {
+            return [];
+        }
+
+        const merged: Array<{ start: number; end: number; similarity: number; chunkIndex: number }> = [
+            { ...sorted[0] },
+        ];
+
+        for (let i = 1; i < sorted.length; i++) {
+            const current = sorted[i];
+            const last = merged[merged.length - 1];
+
+            if (current.start <= last.end + 1) {
+                last.end = Math.max(last.end, current.end);
+                if (current.similarity > last.similarity) {
+                    last.similarity = current.similarity;
+                    last.chunkIndex = current.chunkIndex;
+                }
+                continue;
+            }
+
+            merged.push({ ...current });
+        }
+
+        return merged;
+    }
+
+    private limitContext(contextText: string) {
+        if (contextText.length <= this.maxContextChars) {
+            return contextText;
+        }
+
+        return `${contextText.slice(0, this.maxContextChars)}\n\n[Context truncated for length]`;
     }
 
     private async streamGenerate(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {

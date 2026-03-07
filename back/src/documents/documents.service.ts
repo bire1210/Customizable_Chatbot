@@ -2,10 +2,16 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { promises as fs } from 'fs';
 import { extname, join } from 'path';
+import crypto from 'crypto';
 import { extractTextFromHtml } from './text-extractors/htmls';
 import { extractTextFromMarkdown } from './text-extractors/markdown';
 import { extractTextFromPdf } from './text-extractors/pdf';
 import { VectorService } from 'src/vector/vector.service';
+
+type ChunkDraft = {
+  chunkIndex: number;
+  content: string;
+};
 
 @Injectable()
 export class DocumentsService {
@@ -59,18 +65,25 @@ export class DocumentsService {
       throw new Error('No chunks generated from document');
     }
 
-    const embeddings = await this.vectorService.createBatchEmbeddings(chunks);
+    const chunkTexts = chunks.map((chunk) => chunk.content);
+    const embeddings = await this.vectorService.createBatchEmbeddings(chunkTexts);
 
     if (chunks.length !== embeddings?.length) {
       throw new Error('Chunks and embeddings count mismatch');
     }
 
-    const valuePlaceholders = chunks.map((_, i) => `('${crypto.randomUUID()}', '${documentId}'::uuid, $${i + 1}, '${formatVector(embeddings[i])}'::vector)`).join(',');
+    const valuePlaceholders = chunks
+      .map(
+        (chunk, i) =>
+          `('${crypto.randomUUID()}', '${documentId}'::uuid, ${chunk.chunkIndex}, $${i + 1}, '${formatVector(embeddings[i])}'::vector)`,
+      )
+      .join(',');
+
     await this.prisma.$executeRawUnsafe(
-      `INSERT INTO "DocumentChunk" (id, "documentId", content, embedding) VALUES ${valuePlaceholders}`,
-      ...chunks,
+      `INSERT INTO "DocumentChunk" (id, "documentId", "chunkIndex", content, embedding) VALUES ${valuePlaceholders}`,
+      ...chunkTexts,
     );
-    }
+  }
 
     async getDocuments() {
         return this.prisma.document.findMany();
@@ -83,8 +96,9 @@ export class DocumentsService {
     }
 
     async getDocumentChunks(id: string) {
-      return this.prisma.documentChunk.findMany({
+      return (this.prisma as any).documentChunk.findMany({
         where: { documentId: id },
+        orderBy: { chunkIndex: 'asc' },
       });
     }
 
@@ -108,7 +122,7 @@ export class DocumentsService {
       }
 
       if (extension === '.txt') {
-        return normalizeWhitespace(content);
+        return cleanTextForChunking(content);
       }
 
       throw new BadRequestException(`Unsupported file type: ${extension || 'unknown'}`);
@@ -130,13 +144,14 @@ export class DocumentsService {
       const vector = formatVector(queryEmbedding)
 
       const result = await this.prisma.$queryRawUnsafe<
-        { id: string; content: string; documentId: string; distance: number }[]
+        { id: string; content: string; documentId: string; chunkIndex: number; distance: number }[]
       >(
         `
         SELECT 
           id,
           content,
           "documentId",
+          "chunkIndex",
           embedding <=> $1::vector AS distance
         FROM "DocumentChunk"
         ORDER BY embedding <=> $1::vector
@@ -146,32 +161,127 @@ export class DocumentsService {
         limit,
       )
 
-      return result
+      return result.map((row) => ({
+        ...row,
+        similarity: normalizeSimilarity(row.distance),
+      }));
     }
 
-  chunkText(text: string, chunkSize = 500, overlap = 100) {
-    const words = normalizeWhitespace(text).split(' ');
+  chunkText(text: string, chunkSize = 1800, overlap = 240): ChunkDraft[] {
+    const prepared = cleanTextForChunking(text);
+    const paragraphs = prepared
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    const units = paragraphs.flatMap((paragraph) => this.splitParagraph(paragraph, chunkSize));
+    const chunkContents = mergeUnitsWithOverlap(units, chunkSize, overlap);
+
+    return chunkContents
+      .map((content, index) => ({ chunkIndex: index, content: content.trim() }))
+      .filter((chunk) => chunk.content.length > 0);
+  }
+
+  private splitParagraph(paragraph: string, chunkSize: number): string[] {
+    if (paragraph.length <= chunkSize) {
+      return [paragraph];
+    }
+
+    const sentenceLike = paragraph
+      .match(/[^.!?\n]+(?:[.!?]+|$)/g)
+      ?.map((part) => part.trim())
+      .filter(Boolean);
+
+    if (!sentenceLike || sentenceLike.length <= 1) {
+      return splitByLength(paragraph, chunkSize);
+    }
+
     const chunks: string[] = [];
+    let current = '';
 
-    let i = 0;
-    while (i < words.length) {
-      chunks.push(words.slice(i, i + chunkSize).join(' '));
-      i += chunkSize - overlap;
+    for (const sentence of sentenceLike) {
+      if (!current) {
+        current = sentence;
+        continue;
+      }
+
+      const candidate = `${current} ${sentence}`;
+      if (candidate.length <= chunkSize) {
+        current = candidate;
+        continue;
+      }
+
+      chunks.push(current.trim());
+      current = sentence;
     }
 
-    return chunks;
+    if (current) {
+      chunks.push(current.trim());
+    }
+
+    return chunks.flatMap((chunk) => (chunk.length <= chunkSize ? [chunk] : splitByLength(chunk, chunkSize)));
   }
 }
 
-function normalizeWhitespace(text: string) {
-  return text.replace(/\s+/g, ' ').trim();
+function cleanTextForChunking(text: string) {
+  return text
+    .replace(/\r/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
-async function embedMany(chunks: string[]): Promise<number[][]> {
-  // Placeholder embeddings to keep the pipeline working until a real model is wired up.
-  const dimension = 1536;
-  return chunks.map(() => Array.from({ length: dimension }, () => 0));
+function splitByLength(text: string, maxLen: number) {
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const end = Math.min(start + maxLen, text.length);
+    chunks.push(text.slice(start, end).trim());
+    start = end;
+  }
+
+  return chunks.filter(Boolean);
 }
+
+function mergeUnitsWithOverlap(units: string[], chunkSize: number, overlap: number) {
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const unit of units) {
+    if (!current) {
+      current = unit;
+      continue;
+    }
+
+    const candidate = `${current}\n\n${unit}`;
+    if (candidate.length <= chunkSize) {
+      current = candidate;
+      continue;
+    }
+
+    chunks.push(current.trim());
+
+    const tail = current.slice(Math.max(0, current.length - overlap)).trim();
+    current = tail ? `${tail}\n\n${unit}` : unit;
+
+    if (current.length > chunkSize) {
+      chunks.push(current.slice(0, chunkSize).trim());
+      current = current.slice(chunkSize).trim();
+    }
+  }
+
+  if (current.trim()) {
+    chunks.push(current.trim());
+  }
+
+  return chunks;
+}
+
+function normalizeSimilarity(distance: number) {
+  return Math.max(0, Math.min(1, 1 - distance));
+}
+
 function formatVector(embedding: number[]) {
   return `[${embedding.join(',')}]`;
 }

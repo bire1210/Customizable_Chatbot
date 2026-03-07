@@ -2,10 +2,21 @@ import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import axios from 'axios';
 import { PrismaService } from 'src/prisma/prisma.service';
 
+type RetrievedChunk = {
+    id: string;
+    content: string;
+    documentId: string;
+    chunkIndex: number;
+    distance: number;
+    similarity: number;
+    score: number;
+};
+
 @Injectable()
 export class VectorService {
     private readonly model_name = 'nomic-embed-text';
-    private readonly targetDimension = 1536;
+    private readonly targetDimension = 768;
+    private readonly rrfK = 60;
 
     constructor(private prisma: PrismaService) {}
     
@@ -23,7 +34,7 @@ export class VectorService {
                 throw new InternalServerErrorException('Ollama returned empty embedding for single text');
             }
 
-            return this.normalizeEmbeddingDimensions(vector);
+            return this.ensureEmbeddingDimensions(vector);
         }
         catch(error: unknown){
             const message = error instanceof Error ? error.message : 'Unknown error';
@@ -43,7 +54,7 @@ export class VectorService {
                 throw new InternalServerErrorException('Ollama returned empty embeddings array');
             }
 
-            return embeddings.map((embedding) => this.normalizeEmbeddingDimensions(embedding));
+            return embeddings.map((embedding) => this.ensureEmbeddingDimensions(embedding));
         }
         catch(error: unknown){
             const message = error instanceof Error ? error.message : 'Unknown error';
@@ -51,33 +62,28 @@ export class VectorService {
         }
     }
 
-    private normalizeEmbeddingDimensions(embedding: number[]) {
-        if (embedding.length === this.targetDimension) {
-            return embedding;
+    private ensureEmbeddingDimensions(embedding: number[]) {
+        if (embedding.length !== this.targetDimension) {
+            throw new InternalServerErrorException(
+                `Embedding dimension mismatch. Expected ${this.targetDimension}, got ${embedding.length}`,
+            );
         }
 
-        if (embedding.length > this.targetDimension) {
-            return embedding.slice(0, this.targetDimension);
-        }
-
-        const padded = [...embedding];
-        while (padded.length < this.targetDimension) {
-            padded.push(0);
-        }
-        return padded;
+        return embedding;
     }
 
     async searchSimilarVectors(embedding: number[], topK = 5) {
         const vector = formatVector(embedding);
 
         const result = await this.prisma.$queryRawUnsafe<
-            { id: string; content: string; documentId: string; distance: number }[]
+            { id: string; content: string; documentId: string; chunkIndex: number; distance: number }[]
         >(
             `
             SELECT
               id,
               content,
               "documentId",
+              "chunkIndex",
               embedding <=> $1::vector AS distance
             FROM "DocumentChunk"
             ORDER BY embedding <=> $1::vector
@@ -87,8 +93,74 @@ export class VectorService {
             topK,
         );
 
-        return result;
+        return result.map((row, index) => ({
+            ...row,
+            similarity: normalizeSimilarity(row.distance),
+            score: 1 / (this.rrfK + index + 1),
+        }));
     }
+
+    async searchKeywordChunks(query: string, limit = 20) {
+        const result = await this.prisma.$queryRawUnsafe<
+            { id: string; content: string; documentId: string; chunkIndex: number; rank: number }[]
+        >(
+            `
+            SELECT
+              id,
+              content,
+              "documentId",
+              "chunkIndex",
+              ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', $1)) AS rank
+            FROM "DocumentChunk"
+            WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
+            ORDER BY rank DESC
+            LIMIT $2
+            `,
+            query,
+            limit,
+        );
+
+        return result.map((row, index) => ({
+            id: row.id,
+            content: row.content,
+            documentId: row.documentId,
+            chunkIndex: row.chunkIndex,
+            distance: 1,
+            similarity: 0,
+            score: 1 / (this.rrfK + index + 1),
+        }));
+    }
+
+    async searchHybridChunks(query: string, embedding: number[], topK = 6, candidatePool = 20): Promise<RetrievedChunk[]> {
+        const [vectorResults, keywordResults] = await Promise.all([
+            this.searchSimilarVectors(embedding, candidatePool),
+            this.searchKeywordChunks(query, candidatePool),
+        ]);
+
+        const merged = new Map<string, RetrievedChunk>();
+
+        for (const item of [...vectorResults, ...keywordResults]) {
+            const existing = merged.get(item.id);
+            if (!existing) {
+                merged.set(item.id, { ...item });
+                continue;
+            }
+
+            existing.score += item.score;
+            if (item.distance < existing.distance) {
+                existing.distance = item.distance;
+                existing.similarity = item.similarity;
+            }
+        }
+
+        return [...merged.values()]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, topK);
+    }
+}
+
+function normalizeSimilarity(distance: number) {
+    return Math.max(0, Math.min(1, 1 - distance));
 }
 
 function formatVector(embedding: number[]) {

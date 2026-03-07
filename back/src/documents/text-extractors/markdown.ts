@@ -13,11 +13,15 @@ export function extractTextFromMarkdown(markdown: string) {
 	// Replace links with link text
 	text = text.replace(/\[([^\]]+)\]\([^\)]*\)/g, '$1');
 
-	// Remove headings, blockquotes, and list markers
-	text = text.replace(/^>\s?/gm, ' ');
-	text = text.replace(/^#{1,6}\s+/gm, ' ');
-	text = text.replace(/^[\-*+]\s+/gm, ' ');
-	text = text.replace(/^\d+\.\s+/gm, ' ');
+	// Keep headings and list boundaries instead of flattening structure.
+	text = text.replace(/^>\s?/gm, '');
+	text = text.replace(/^#{1,6}\s+/gm, '');
+	text = text.replace(/^[\-*+]\s+/gm, '- ');
+	text = text.replace(/^\d+\.\s+/gm, '- ');
 
-	return text.replace(/\s+/g, ' ').trim();
+	return text
+		.replace(/\r/g, '')
+		.replace(/[ \t]+/g, ' ')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim();
 }

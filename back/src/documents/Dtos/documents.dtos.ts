@@ -22,5 +22,8 @@ export class DocumentChunkDto {
   documentId: string;
 
   @ApiProperty()
+  chunkIndex: number;
+
+  @ApiProperty()
   content: string;
 }

@@ -38,9 +38,12 @@ model Document {
 model DocumentChunk {
   id         String                      @id @default(uuid())
   documentId String
+  chunkIndex Int
   content    String
-  embedding  Unsupported("vector(1536)")
+  embedding  Unsupported("vector(768)")
   document   Document                    @relation(fields: [documentId], references: [id])
+
+  @@index([documentId, chunkIndex])
 }
 
 model ChatSession {

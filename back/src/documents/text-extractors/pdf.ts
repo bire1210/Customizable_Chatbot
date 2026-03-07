@@ -8,5 +8,14 @@ export async function extractTextFromPdf(
     const parser = new PDFParse(uint8);
     const data = await parser.getText();
 
-    return data.text ?? '';
+    return cleanPdfText(data.text ?? '');
 }
+
+  function cleanPdfText(text: string) {
+    return text
+    .replace(/\r/g, '')
+    .replace(/(\w)-\n(\w)/g, '$1$2')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  }
