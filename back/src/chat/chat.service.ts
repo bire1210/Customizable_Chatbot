@@ -13,7 +13,9 @@ export class ChatService {
     private readonly topK = 5;
     private readonly historyWindow = 10;
     private readonly maxContextChars = 9000;
-    private readonly minSimilarity = 0.6;
+    private readonly minSimilarity = 0.52;
+    private readonly maxReplyChars = 6400;
+    private readonly maxPredictTokens = 1400;
 
     constructor(
         private vector: VectorService,
@@ -55,6 +57,7 @@ export class ChatService {
         const reliableChunks = topChunks.filter((chunk) => chunk.similarity >= this.minSimilarity);
         const chunksForContext = reliableChunks.length ? reliableChunks : topChunks.slice(0, 2);
         const expandedContexts = await this.expandContexts(chunksForContext, 1);
+        const hasReliableContext = reliableChunks.length > 0;
 
         const contextText = expandedContexts.length
             ? this.limitContext(
@@ -65,9 +68,9 @@ export class ChatService {
                   })
                   .join('\n\n---\n\n'),
               )
-            : 'No reliable context was retrieved from the knowledge base.';
+            : 'No usable context retrieved.';
 
-        const contextHeader = reliableChunks.length
+        const contextHeader = hasReliableContext
             ? ''
             : 'Context quality is low. Use only what is explicitly supported by the retrieved excerpts.\n\n';
 
@@ -82,9 +85,23 @@ export class ChatService {
             .map((m) => `${m.role}: ${m.content}`)
             .join('\n');
 
-        const prompt = `You are an assistant. Answer using only the provided context when possible. If context is insufficient, say you do not know and ask for a more specific source. Keep the answer concise and avoid repetition.\n\nConversation:\n${conversation}\n\nContext:\n${contextHeader}${contextText}\n\nUser: ${userMessage}\nAssistant:`;
+        const prompt = `You are an assistant for document-grounded Q&A.
+    Rules:
+    1) Prioritize the provided context first.
+    2) If context is partial, provide concise general guidance and clearly state what is uncertain.
+    3) Keep output brief: max 6 bullet points or 1 short paragraph.
+    4) Never repeat phrases.
 
-        return { session, topChunks, prompt };
+    Conversation:
+    ${conversation}
+
+    Context:
+    ${contextHeader}${contextText}
+
+    User: ${userMessage}
+    Assistant:`;
+
+        return { session, topChunks, prompt, hasReliableContext };
     }
 
     private async persistAssistantAndBuildResponse(sessionId: string, replyText: string, topChunks: any[]): Promise<ChatResponseDto> {
@@ -213,7 +230,7 @@ export class ChatService {
             return contextText;
         }
 
-        return `${contextText.slice(0, this.maxContextChars)}\n\n[Context truncated for length]`;
+        return contextText.slice(0, this.maxContextChars);
     }
 
     private async streamGenerate(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
@@ -224,15 +241,30 @@ export class ChatService {
                 model: this.model_name,
                 prompt,
                 stream: true,
+                options: {
+                    num_predict: this.maxPredictTokens,
+                    temperature: 0.2,
+                    repeat_penalty: 1.2,
+                    top_p: 0.9,
+                    stop: ['\nUser:', '\nUSER:', '\nSystem:'],
+                },
             }, {
                 responseType: 'stream',
             });
 
             const stream = resp.data as Readable;
             let buffer = '';
+            let settled = false;
 
             await new Promise<void>((resolve, reject) => {
+                const finish = () => {
+                    if (settled) return;
+                    settled = true;
+                    resolve();
+                };
+
                 stream.on('data', (chunk: Buffer | string) => {
+                    if (settled) return;
                     buffer += chunk.toString();
 
                     const lines = buffer.split('\n');
@@ -246,9 +278,28 @@ export class ChatService {
                             const parsed = JSON.parse(trimmed);
                             const token = parsed?.response ?? '';
 
+                            if (parsed?.done) {
+                                finish();
+                                return;
+                            }
+
                             if (token) {
-                                replyText += token;
-                                if (onChunk) onChunk(token);
+                                const remaining = this.maxReplyChars - replyText.length;
+                                if (remaining <= 0) {
+                                    finish();
+                                    stream.destroy();
+                                    return;
+                                }
+
+                                const safeToken = token.slice(0, remaining);
+                                replyText += safeToken;
+                                if (onChunk) onChunk(safeToken);
+
+                                if (replyText.length >= this.maxReplyChars) {
+                                    finish();
+                                    stream.destroy();
+                                    return;
+                                }
                             }
                         } catch {
                             // Ignore malformed partial JSON chunks.
@@ -265,21 +316,33 @@ export class ChatService {
                             const token = parsed?.response ?? '';
 
                             if (token) {
-                                replyText += token;
-                                if (onChunk) onChunk(token);
+                                const remaining = this.maxReplyChars - replyText.length;
+                                if (remaining > 0) {
+                                    const safeToken = token.slice(0, remaining);
+                                    replyText += safeToken;
+                                    if (onChunk) onChunk(safeToken);
+                                }
                             }
                         } catch {
                             // Ignore trailing malformed JSON.
                         }
                     }
 
-                    resolve();
+                    finish();
                 });
 
-                stream.on('error', (err: Error) => reject(err));
+                stream.on('error', (err: Error) => {
+                    if (settled) return;
+                    reject(err);
+                });
             });
 
-            return replyText;
+            const sanitized = replyText.trim();
+            if (!sanitized) {
+                return "I don't have enough grounded context to answer that yet.";
+            }
+
+            return sanitized;
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Unknown error';
             throw new InternalServerErrorException(`LLM generation failed: ${message}`);

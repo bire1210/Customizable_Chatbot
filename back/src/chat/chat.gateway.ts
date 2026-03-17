@@ -3,6 +3,7 @@ import {
   WebSocketServer,
   SubscribeMessage,
   MessageBody,
+  ConnectedSocket,
   OnGatewayInit,
   OnGatewayConnection,
   OnGatewayDisconnect,
@@ -31,10 +32,10 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   @SubscribeMessage('chat')
-  async handleChat(client: Socket, @MessageBody() data: any) {
+  async handleChat(@ConnectedSocket() client: Socket, @MessageBody() data: any) {
     // data may be { sessionToken?, message }
     let sessionToken: string | undefined = undefined;
-    let message: string;
+    let message = '';
 
     if (typeof data === 'string') {
       message = data;
@@ -43,10 +44,14 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
       message = data?.message;
     }
 
-    console.log(`received 'chat' from ${client.id}`, { sessionToken, message });
+    if (!message?.trim()) {
+      this.sendResponse(client, 'chat-error', { message: 'Message is required' });
+      return { event: 'chat-error', data: { message: 'Message is required' } };
+    }
 
     try {
       this.sendResponse(client, 'chat-start', { sessionToken: sessionToken ?? null });
+      console.log(`Received message from client ${message} (sessionToken: ${sessionToken})`);
 
       const result = await this.chat.handleUserMessageStream(
         sessionToken,
@@ -73,7 +78,9 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   }
 
   private sendResponse(client: Socket, event: string, payload: any) {
-    console.log(`emitting '${event}' to ${client.id}`);
+    if (!client || typeof client.emit !== 'function') {
+      return;
+    }
     client.emit(event, payload);
   }
 }
