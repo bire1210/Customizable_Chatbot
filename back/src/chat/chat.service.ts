@@ -5,6 +5,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { ChatResponseDto } from './Dtos/chat-response.dto';
 import crypto from 'crypto';
 import { Readable } from 'stream';
+import { QueryRewriterService } from './query-rewriter.service';
 
 @Injectable()
 export class ChatService {
@@ -20,6 +21,7 @@ export class ChatService {
     constructor(
         private vector: VectorService,
         private prisma: PrismaService,
+        private queryRewriter: QueryRewriterService,
     ) {}
 
     async getOrCreateSession(sessionToken?: string) {
@@ -52,8 +54,9 @@ export class ChatService {
 
         await this.storeMessage(session.id, 'USER', userMessage);
 
-        const embedding = await this.vector.createSingleTextVector(userMessage);
-        const topChunks = await this.vector.searchHybridChunks(userMessage, embedding, this.topK, 20);
+        const retrievalQuery = await this.queryRewriter.rewriteForRetrieval(userMessage);
+        const embedding = await this.vector.createSingleTextVector(retrievalQuery);
+        const topChunks = await this.vector.searchHybridChunks(retrievalQuery, embedding, this.topK, 20);
         const reliableChunks = topChunks.filter((chunk) => chunk.similarity >= this.minSimilarity);
         const chunksForContext = reliableChunks.length ? reliableChunks : topChunks.slice(0, 2);
         const expandedContexts = await this.expandContexts(chunksForContext, 1);
