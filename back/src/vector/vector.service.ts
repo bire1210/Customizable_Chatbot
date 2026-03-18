@@ -12,6 +12,11 @@ type RetrievedChunk = {
     score: number;
 };
 
+type FusionOptions = {
+    topK?: number;
+    variantWeights?: number[];
+};
+
 @Injectable()
 export class VectorService {
     private readonly model_name = 'nomic-embed-text';
@@ -156,6 +161,52 @@ export class VectorService {
         return [...merged.values()]
             .sort((a, b) => b.score - a.score)
             .slice(0, topK);
+    }
+
+    fuseMultiQueryResults(resultSets: RetrievedChunk[][], options: FusionOptions = {}): RetrievedChunk[] {
+        const topK = options.topK ?? 6;
+        const variantWeights = options.variantWeights ?? [];
+        const merged = new Map<string, RetrievedChunk>();
+
+        for (let setIndex = 0; setIndex < resultSets.length; setIndex++) {
+            const weight = variantWeights[setIndex] ?? this.defaultVariantWeight(setIndex);
+            const set = resultSets[setIndex] ?? [];
+
+            for (const item of set) {
+                const existing = merged.get(item.id);
+                const weightedScore = item.score * weight;
+
+                if (!existing) {
+                    merged.set(item.id, {
+                        ...item,
+                        score: weightedScore,
+                    });
+                    continue;
+                }
+
+                existing.score += weightedScore;
+                if (item.distance < existing.distance) {
+                    existing.distance = item.distance;
+                    existing.similarity = item.similarity;
+                }
+            }
+        }
+
+        return [...merged.values()]
+            .sort((a, b) => b.score - a.score)
+            .slice(0, topK);
+    }
+
+    private defaultVariantWeight(index: number) {
+        if (index === 0) {
+            return 1;
+        }
+
+        if (index === 1) {
+            return 0.85;
+        }
+
+        return 0.7;
     }
 }
 

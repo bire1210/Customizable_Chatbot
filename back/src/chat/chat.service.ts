@@ -17,6 +17,8 @@ export class ChatService {
     private readonly minSimilarity = 0.52;
     private readonly maxReplyChars = 6400;
     private readonly maxPredictTokens = 1400;
+    private readonly enableMultiQueryFusion = process.env.ENABLE_MULTI_QUERY_FUSION !== 'false';
+    private readonly retrievalCandidatePool = 20;
 
     constructor(
         private vector: VectorService,
@@ -54,9 +56,7 @@ export class ChatService {
 
         await this.storeMessage(session.id, 'USER', userMessage);
 
-        const retrievalQuery = await this.queryRewriter.rewriteForRetrieval(userMessage);
-        const embedding = await this.vector.createSingleTextVector(retrievalQuery);
-        const topChunks = await this.vector.searchHybridChunks(retrievalQuery, embedding, this.topK, 20);
+        const topChunks = await this.retrieveWithContextFusion(userMessage);
         const reliableChunks = topChunks.filter((chunk) => chunk.similarity >= this.minSimilarity);
         const chunksForContext = reliableChunks.length ? reliableChunks : topChunks.slice(0, 2);
         const expandedContexts = await this.expandContexts(chunksForContext, 1);
@@ -105,6 +105,40 @@ export class ChatService {
     Assistant:`;
 
         return { session, topChunks, prompt, hasReliableContext };
+    }
+
+    private async retrieveWithContextFusion(userMessage: string) {
+        if (!this.enableMultiQueryFusion) {
+            const retrievalQuery = await this.queryRewriter.rewriteForRetrieval(userMessage);
+            const embedding = await this.vector.createSingleTextVector(retrievalQuery);
+            return this.vector.searchHybridChunks(retrievalQuery, embedding, this.topK, this.retrievalCandidatePool);
+        }
+
+        const variants = await this.queryRewriter.buildQueryVariants(userMessage);
+        const fallbackQuery = variants[0] ?? userMessage;
+
+        try {
+            const embeddings = await this.vector.createBatchEmbeddings(variants);
+            const settled = await Promise.allSettled(
+                variants.map((query, index) =>
+                    this.vector.searchHybridChunks(query, embeddings[index], this.topK, this.retrievalCandidatePool),
+                ),
+            );
+
+            const successfulResults = settled
+                .filter((result): result is PromiseFulfilledResult<any[]> => result.status === 'fulfilled')
+                .map((result) => result.value);
+
+            if (!successfulResults.length) {
+                const fallbackEmbedding = await this.vector.createSingleTextVector(fallbackQuery);
+                return this.vector.searchHybridChunks(fallbackQuery, fallbackEmbedding, this.topK, this.retrievalCandidatePool);
+            }
+
+            return this.vector.fuseMultiQueryResults(successfulResults, { topK: this.topK });
+        } catch {
+            const fallbackEmbedding = await this.vector.createSingleTextVector(fallbackQuery);
+            return this.vector.searchHybridChunks(fallbackQuery, fallbackEmbedding, this.topK, this.retrievalCandidatePool);
+        }
     }
 
     private async persistAssistantAndBuildResponse(sessionId: string, replyText: string, topChunks: any[]): Promise<ChatResponseDto> {
