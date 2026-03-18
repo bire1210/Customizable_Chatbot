@@ -7,23 +7,53 @@ export class QueryRewriterService {
   private readonly llmUrl = process.env.QUERY_REWRITER_LLM_URL ?? 'http://localhost:11434/api/generate';
   private readonly llmModel = process.env.QUERY_REWRITER_LLM_MODEL ?? 'phi4-mini';
   private readonly enableLlmFallback = process.env.QUERY_REWRITER_ENABLE_LLM_FALLBACK === 'true';
+  private readonly maxVariants = Number(process.env.QUERY_REWRITER_MAX_VARIANTS ?? 3);
+  private readonly stopWords = new Set([
+    'a', 'an', 'the', 'and', 'or', 'but', 'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with', 'from',
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'this', 'that', 'these', 'those',
+    'can', 'could', 'would', 'should', 'please', 'kindly', 'tell', 'me', 'about', 'my', 'your',
+    'how', 'what', 'why', 'when', 'where', 'who', 'which',
+  ]);
 
   async rewriteForRetrieval(rawQuery: string): Promise<string> {
+    const variants = await this.buildQueryVariants(rawQuery);
+    return variants[0] ?? rawQuery;
+  }
+
+  async buildQueryVariants(rawQuery: string): Promise<string[]> {
     const normalized = this.normalizeWhitespace(rawQuery);
     const deterministic = this.applyDeterministicRewrite(normalized);
 
-    if (!this.shouldUseLlmFallback(normalized, deterministic)) {
-      return deterministic;
+    const variants = new Set<string>();
+    variants.add(deterministic);
+
+    for (const item of this.buildDeterministicVariants(deterministic)) {
+      variants.add(item);
+      if (variants.size >= this.maxVariants) {
+        return [...variants].slice(0, this.maxVariants);
+      }
+    }
+
+    if (!this.shouldUseLlmFallback(normalized, deterministic) || variants.size >= this.maxVariants) {
+      return [...variants].slice(0, this.maxVariants);
     }
 
     try {
-      const llmRewrite = await this.rewriteWithLlm(normalized);
-      return llmRewrite || deterministic;
+      const needed = Math.max(0, this.maxVariants - variants.size);
+      if (!needed) {
+        return [...variants].slice(0, this.maxVariants);
+      }
+
+      const llmVariants = await this.rewriteWithLlmVariants(normalized, needed);
+      for (const variant of llmVariants) {
+        variants.add(variant);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown rewrite error';
-      this.logger.warn(`LLM fallback rewrite failed. Using deterministic rewrite. Reason: ${message}`);
-      return deterministic;
+      this.logger.warn(`LLM variant generation failed. Using deterministic variants. Reason: ${message}`);
     }
+
+    return [...variants].slice(0, this.maxVariants);
   }
 
   private normalizeWhitespace(input: string): string {
@@ -49,6 +79,46 @@ export class QueryRewriterService {
     return rewritten;
   }
 
+  private buildDeterministicVariants(base: string): string[] {
+    const variants: string[] = [];
+
+    const keywordVariant = this.createKeywordFocusedVariant(base);
+    if (keywordVariant && keywordVariant !== base) {
+      variants.push(keywordVariant);
+    }
+
+    const decomposition = this.createSimpleDecompositionVariant(base);
+    if (decomposition && decomposition !== base && decomposition !== keywordVariant) {
+      variants.push(decomposition);
+    }
+
+    return variants;
+  }
+
+  private createKeywordFocusedVariant(input: string): string {
+    const tokens = input
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !this.stopWords.has(token));
+
+    return this.normalizeWhitespace(tokens.join(' '));
+  }
+
+  private createSimpleDecompositionVariant(input: string): string {
+    const separators = /\b(and|vs|versus|, then | also |\+)\b/i;
+    const parts = input
+      .split(separators)
+      .map((part) => this.normalizeWhitespace(part))
+      .filter((part) => part && !/^(and|vs|versus|, then|also|\+)$/i.test(part));
+
+    if (parts.length < 2) {
+      return '';
+    }
+
+    return parts.slice(0, 2).join(' | ');
+  }
+
   private shouldUseLlmFallback(original: string, deterministic: string): boolean {
     if (!this.enableLlmFallback) {
       return false;
@@ -65,16 +135,17 @@ export class QueryRewriterService {
     return false;
   }
 
-  private async rewriteWithLlm(query: string): Promise<string> {
+  private async rewriteWithLlmVariants(query: string, count: number): Promise<string[]> {
     const prompt = [
       'Rewrite the user query for retrieval in a RAG system.',
       'Rules:',
       '1) Keep intent unchanged.',
       '2) Remove irrelevant conversational filler.',
       '3) Preserve domain nouns and key constraints.',
-      '4) Return exactly one rewritten query and nothing else.',
+      `4) Return exactly ${count} rewritten query variants.`,
+      '5) Output one variant per line with no numbering.',
       `User query: ${query}`,
-      'Rewritten query:',
+      'Rewritten queries:',
     ].join('\n');
 
     const response = await axios.post(this.llmUrl, {
@@ -87,7 +158,11 @@ export class QueryRewriterService {
       },
     });
 
-    const rewritten = String(response?.data?.response ?? '').replace(/\s+/g, ' ').trim();
-    return rewritten;
+    const raw = String(response?.data?.response ?? '');
+    return raw
+      .split('\n')
+      .map((line) => this.normalizeWhitespace(line.replace(/^[-*\d.)\s]+/, '')))
+      .filter((line) => line.length > 4)
+      .slice(0, count);
   }
 }
