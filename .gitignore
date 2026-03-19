@@ -140,3 +140,5 @@ vite.config.ts.timestamp-*
 
 prisma/generated/
 src/generated/
+
+online-turn-eval.jsonl

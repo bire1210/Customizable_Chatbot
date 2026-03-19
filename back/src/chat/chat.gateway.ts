@@ -59,6 +59,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         (chunk: string) => {
           this.sendResponse(client, 'chat-chunk', { chunk });
         },
+        { channel: 'ws', clientId: client.id },
       );
 
       this.sendResponse(client, 'chat-end', {

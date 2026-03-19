@@ -283,6 +283,239 @@ a {
   margin: 0.9rem 0 0.5rem;
 }
 
+.eval-card {
+  margin-bottom: 1rem;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(55, 127, 96, 0.12), rgba(55, 127, 96, 0) 45%),
+    radial-gradient(circle at 100% 100%, rgba(52, 74, 116, 0.1), rgba(52, 74, 116, 0) 50%),
+    var(--panel);
+}
+
+.eval-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.eval-header p {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-top: 0.2rem;
+}
+
+.eval-controls {
+  display: flex;
+  align-items: end;
+  gap: 0.55rem;
+}
+
+.eval-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.eval-controls select {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.45rem 0.65rem;
+  background: #fffefb;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+
+.kpi {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background: #fffefb;
+}
+
+.kpi span {
+  font-size: 0.76rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.kpi strong {
+  font-size: 1.1rem;
+}
+
+.kpi.good {
+  border-color: #9dd9bf;
+}
+
+.kpi.warn {
+  border-color: #e8c48d;
+}
+
+.kpi.bad {
+  border-color: #e2a29b;
+}
+
+.kpi.info {
+  border-color: #aabfe3;
+}
+
+.eval-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.chart-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.75rem;
+  background: #fffeff;
+}
+
+.chart-card h3 {
+  margin: 0 0 0.55rem;
+  font-size: 0.95rem;
+}
+
+.simple-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 52px 1fr 48px;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+}
+
+.bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: #ece9de;
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2f7f60, #43699a);
+  border-radius: inherit;
+}
+
+.line-chart-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.line-chart {
+  width: 100%;
+  height: 170px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f8f7f1 0%, #f1efe6 100%);
+}
+
+.line-primary {
+  fill: none;
+  stroke: #1f7a5d;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.line-secondary {
+  fill: none;
+  stroke: #4d5f9a;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
+}
+
+.line-legend {
+  display: flex;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+}
+
+.legend-primary,
+.legend-secondary {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  background: #fffefb;
+}
+
+.legend-primary {
+  color: #1f7a5d;
+}
+
+.legend-secondary {
+  color: #4d5f9a;
+}
+
+.donut-wrap {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.donut-chart {
+  width: 120px;
+  height: 120px;
+}
+
+.donut-base {
+  fill: none;
+  stroke: #ece9de;
+  stroke-width: 16;
+}
+
+.donut-segment {
+  fill: none;
+  stroke-width: 16;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+}
+
+.donut-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.donut-legend div {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.donut-legend span {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.donut-legend small {
+  color: var(--muted);
+}
+
 .stack-form {
   display: flex;
   flex-direction: column;
@@ -323,5 +556,23 @@ a {
 
   .admin-grid {
     grid-template-columns: 1fr;
+  }
+
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .eval-chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .eval-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .donut-wrap {
+    grid-template-columns: 1fr;
+    justify-items: center;
   }
 }

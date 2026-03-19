@@ -6,10 +6,11 @@ import { DocumentsModule } from 'src/documents/documents.module';
 import { ChatGateway } from './chat.gateway';
 import { PrismaModule } from 'src/prisma/prisma.module';
 import { QueryRewriterService } from './query-rewriter.service';
+import { EvaluationLoggerService } from 'src/evaluation/evaluation-logger.service';
 
 @Module({
   imports: [PrismaModule, VectorModule, DocumentsModule],
   controllers: [ChatController],
-  providers: [ChatService, ChatGateway, QueryRewriterService],
+  providers: [ChatService, ChatGateway, QueryRewriterService, EvaluationLoggerService],
 })
 export class ChatModule {}
