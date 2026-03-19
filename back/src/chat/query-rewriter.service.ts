@@ -7,7 +7,7 @@ export class QueryRewriterService {
   private readonly llmUrl = process.env.QUERY_REWRITER_LLM_URL ?? 'http://localhost:11434/api/generate';
   private readonly llmModel = process.env.QUERY_REWRITER_LLM_MODEL ?? 'phi4-mini';
   private readonly enableLlmFallback = process.env.QUERY_REWRITER_ENABLE_LLM_FALLBACK === 'true';
-  private readonly maxVariants = Number(process.env.QUERY_REWRITER_MAX_VARIANTS ?? 3);
+  private readonly maxVariants = Number(process.env.QUERY_REWRITER_MAX_VARIANTS ?? 4);
   private readonly stopWords = new Set([
     'a', 'an', 'the', 'and', 'or', 'but', 'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with', 'from',
     'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'this', 'that', 'these', 'those',
@@ -87,9 +87,15 @@ export class QueryRewriterService {
       variants.push(keywordVariant);
     }
 
-    const decomposition = this.createSimpleDecompositionVariant(base);
-    if (decomposition && decomposition !== base && decomposition !== keywordVariant) {
-      variants.push(decomposition);
+    for (const decomposition of this.createSimpleDecompositionVariants(base)) {
+      if (decomposition && decomposition !== base && decomposition !== keywordVariant) {
+        variants.push(decomposition);
+      }
+    }
+
+    const stepBack = this.createStepBackVariant(base);
+    if (stepBack && stepBack !== base) {
+      variants.push(stepBack);
     }
 
     return variants;
@@ -105,7 +111,7 @@ export class QueryRewriterService {
     return this.normalizeWhitespace(tokens.join(' '));
   }
 
-  private createSimpleDecompositionVariant(input: string): string {
+  private createSimpleDecompositionVariants(input: string): string[] {
     const separators = /\b(and|vs|versus|, then | also |\+)\b/i;
     const parts = input
       .split(separators)
@@ -113,10 +119,23 @@ export class QueryRewriterService {
       .filter((part) => part && !/^(and|vs|versus|, then|also|\+)$/i.test(part));
 
     if (parts.length < 2) {
+      return [];
+    }
+
+    return parts.slice(0, 2);
+  }
+
+  private createStepBackVariant(input: string): string {
+    const cleaned = this.normalizeWhitespace(input);
+    if (!cleaned) {
       return '';
     }
 
-    return parts.slice(0, 2).join(' | ');
+    if (/^(how|why|when|what|which|who)\b/i.test(cleaned)) {
+      return `Core concepts and best practices for: ${cleaned}`;
+    }
+
+    return `Overview and key concepts: ${cleaned}`;
   }
 
   private shouldUseLlmFallback(original: string, deterministic: string): boolean {
@@ -144,6 +163,8 @@ export class QueryRewriterService {
       '3) Preserve domain nouns and key constraints.',
       `4) Return exactly ${count} rewritten query variants.`,
       '5) Output one variant per line with no numbering.',
+      '6) If query is compound, include at least one decomposition variant.',
+      '7) Include one higher-level step-back variant.',
       `User query: ${query}`,
       'Rewritten queries:',
     ].join('\n');

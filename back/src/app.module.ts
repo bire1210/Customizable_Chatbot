@@ -10,6 +10,7 @@ import { SeedModule } from './seed/seed.module';
 import { DocumentsModule } from './documents/documents.module';
 import { VectorModule } from './vector/vector.module';
 import { ChatModule } from './chat/chat.module';
+import { EvaluationModule } from './evaluation/evaluation.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { ChatModule } from './chat/chat.module';
     DocumentsModule,
     VectorModule,
     ChatModule,
+    EvaluationModule,
   ],
   controllers: [AppController],
   providers: [AppService],

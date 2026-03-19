@@ -6,6 +6,12 @@ import { ChatResponseDto } from './Dtos/chat-response.dto';
 import crypto from 'crypto';
 import { Readable } from 'stream';
 import { QueryRewriterService } from './query-rewriter.service';
+import { EvaluationLoggerService, RetrievalTelemetry } from 'src/evaluation/evaluation-logger.service';
+
+type RequestMeta = {
+    channel?: 'ws' | 'http' | 'unknown';
+    clientId?: string;
+};
 
 @Injectable()
 export class ChatService {
@@ -18,12 +24,13 @@ export class ChatService {
     private readonly maxReplyChars = 6400;
     private readonly maxPredictTokens = 1400;
     private readonly enableMultiQueryFusion = process.env.ENABLE_MULTI_QUERY_FUSION !== 'false';
-    private readonly retrievalCandidatePool = 20;
+    private readonly retrievalCandidatePool = Number(process.env.RETRIEVAL_CANDIDATE_POOL ?? 40);
 
     constructor(
         private vector: VectorService,
         private prisma: PrismaService,
         private queryRewriter: QueryRewriterService,
+        private evaluationLogger: EvaluationLoggerService,
     ) {}
 
     async getOrCreateSession(sessionToken?: string) {
@@ -56,7 +63,8 @@ export class ChatService {
 
         await this.storeMessage(session.id, 'USER', userMessage);
 
-        const topChunks = await this.retrieveWithContextFusion(userMessage);
+        const retrieval = await this.retrieveWithContextFusion(userMessage);
+        const topChunks = retrieval.topChunks;
         const reliableChunks = topChunks.filter((chunk) => chunk.similarity >= this.minSimilarity);
         const chunksForContext = reliableChunks.length ? reliableChunks : topChunks.slice(0, 2);
         const expandedContexts = await this.expandContexts(chunksForContext, 1);
@@ -88,11 +96,13 @@ export class ChatService {
             .map((m) => `${m.role}: ${m.content}`)
             .join('\n');
 
+        const responseStyleGuide = this.buildResponseStyleGuide(userMessage);
+
         const prompt = `You are an assistant for document-grounded Q&A.
     Rules:
     1) Prioritize the provided context first.
     2) If context is partial, provide concise general guidance and clearly state what is uncertain.
-    3) Keep output brief: max 6 bullet points or 1 short paragraph.
+    3) ${responseStyleGuide}
     4) Never repeat phrases.
 
     Conversation:
@@ -104,26 +114,72 @@ export class ChatService {
     User: ${userMessage}
     Assistant:`;
 
-        return { session, topChunks, prompt, hasReliableContext };
+        return {
+            session,
+            topChunks,
+            prompt,
+            hasReliableContext,
+            contextChars: contextText.length,
+            retrievalTelemetry: retrieval.telemetry,
+        };
     }
 
-    private async retrieveWithContextFusion(userMessage: string) {
+    private async retrieveWithContextFusion(userMessage: string): Promise<{ topChunks: any[]; telemetry: RetrievalTelemetry }> {
+        const retrievalStart = Date.now();
+
         if (!this.enableMultiQueryFusion) {
+            const variantStart = Date.now();
             const retrievalQuery = await this.queryRewriter.rewriteForRetrieval(userMessage);
+            const variantGenerationMs = Date.now() - variantStart;
+
+            const embeddingStart = Date.now();
             const embedding = await this.vector.createSingleTextVector(retrievalQuery);
-            return this.vector.searchHybridChunks(retrievalQuery, embedding, this.topK, this.retrievalCandidatePool);
+            const embeddingMs = Date.now() - embeddingStart;
+
+            const searchStart = Date.now();
+            const topChunks = await this.vector.searchHybridChunks(
+                retrievalQuery,
+                embedding,
+                this.topK,
+                this.retrievalCandidatePool,
+            );
+            const searchMs = Date.now() - searchStart;
+
+            return {
+                topChunks,
+                telemetry: {
+                    mode: 'single',
+                    variantCount: 1,
+                    successfulVariantCount: 1,
+                    fallbackUsed: false,
+                    variantGenerationMs,
+                    embeddingMs,
+                    searchMs,
+                    fusionMs: 0,
+                    retrievalMs: Date.now() - retrievalStart,
+                    topChunkIds: topChunks.map((chunk) => chunk.id),
+                    topChunkSimilarities: topChunks.map((chunk) => Number((chunk.similarity ?? 0).toFixed(4))),
+                },
+            };
         }
 
+        const variantStart = Date.now();
         const variants = await this.queryRewriter.buildQueryVariants(userMessage);
+        const variantGenerationMs = Date.now() - variantStart;
         const fallbackQuery = variants[0] ?? userMessage;
 
         try {
+            const embeddingStart = Date.now();
             const embeddings = await this.vector.createBatchEmbeddings(variants);
+            const embeddingMs = Date.now() - embeddingStart;
+
+            const searchStart = Date.now();
             const settled = await Promise.allSettled(
                 variants.map((query, index) =>
                     this.vector.searchHybridChunks(query, embeddings[index], this.topK, this.retrievalCandidatePool),
                 ),
             );
+            const searchMs = Date.now() - searchStart;
 
             const successfulResults = settled
                 .filter((result): result is PromiseFulfilledResult<any[]> => result.status === 'fulfilled')
@@ -131,13 +187,86 @@ export class ChatService {
 
             if (!successfulResults.length) {
                 const fallbackEmbedding = await this.vector.createSingleTextVector(fallbackQuery);
-                return this.vector.searchHybridChunks(fallbackQuery, fallbackEmbedding, this.topK, this.retrievalCandidatePool);
+                const topChunks = await this.vector.searchHybridChunks(
+                    fallbackQuery,
+                    fallbackEmbedding,
+                    this.topK,
+                    this.retrievalCandidatePool,
+                );
+
+                return {
+                    topChunks,
+                    telemetry: {
+                        mode: 'fusion',
+                        variantCount: variants.length,
+                        successfulVariantCount: 0,
+                        fallbackUsed: true,
+                        variantGenerationMs,
+                        embeddingMs,
+                        searchMs,
+                        fusionMs: 0,
+                        retrievalMs: Date.now() - retrievalStart,
+                        topChunkIds: topChunks.map((chunk) => chunk.id),
+                        topChunkSimilarities: topChunks.map((chunk) => Number((chunk.similarity ?? 0).toFixed(4))),
+                    },
+                };
             }
 
-            return this.vector.fuseMultiQueryResults(successfulResults, { topK: this.topK });
+            const fusionStart = Date.now();
+            const topChunks = this.vector.fuseMultiQueryResults(successfulResults, {
+                topK: this.topK,
+                perDocumentCap: 2,
+                diversityLambda: 0.65,
+                candidateMultiplier: 4,
+            });
+            const fusionMs = Date.now() - fusionStart;
+
+            return {
+                topChunks,
+                telemetry: {
+                    mode: 'fusion',
+                    variantCount: variants.length,
+                    successfulVariantCount: successfulResults.length,
+                    fallbackUsed: false,
+                    variantGenerationMs,
+                    embeddingMs,
+                    searchMs,
+                    fusionMs,
+                    retrievalMs: Date.now() - retrievalStart,
+                    topChunkIds: topChunks.map((chunk) => chunk.id),
+                    topChunkSimilarities: topChunks.map((chunk) => Number((chunk.similarity ?? 0).toFixed(4))),
+                },
+            };
         } catch {
+            const fallbackEmbeddingStart = Date.now();
             const fallbackEmbedding = await this.vector.createSingleTextVector(fallbackQuery);
-            return this.vector.searchHybridChunks(fallbackQuery, fallbackEmbedding, this.topK, this.retrievalCandidatePool);
+            const embeddingMs = Date.now() - fallbackEmbeddingStart;
+
+            const fallbackSearchStart = Date.now();
+            const topChunks = await this.vector.searchHybridChunks(
+                fallbackQuery,
+                fallbackEmbedding,
+                this.topK,
+                this.retrievalCandidatePool,
+            );
+            const searchMs = Date.now() - fallbackSearchStart;
+
+            return {
+                topChunks,
+                telemetry: {
+                    mode: 'fusion',
+                    variantCount: variants.length,
+                    successfulVariantCount: 0,
+                    fallbackUsed: true,
+                    variantGenerationMs,
+                    embeddingMs,
+                    searchMs,
+                    fusionMs: 0,
+                    retrievalMs: Date.now() - retrievalStart,
+                    topChunkIds: topChunks.map((chunk) => chunk.id),
+                    topChunkSimilarities: topChunks.map((chunk) => Number((chunk.similarity ?? 0).toFixed(4))),
+                },
+            };
         }
     }
 
@@ -270,6 +399,18 @@ export class ChatService {
         return contextText.slice(0, this.maxContextChars);
     }
 
+    private buildResponseStyleGuide(userMessage: string) {
+        const normalized = userMessage.toLowerCase();
+        const asksForDetail =
+            /(how|why|step|steps|implement|architecture|design|example|explain|guide|walkthrough)/.test(normalized);
+
+        if (asksForDetail) {
+            return 'For how/why/implementation requests, answer in structured detail with step-by-step bullets and practical examples.';
+        }
+
+        return 'Keep output brief: max 6 bullet points or 1 short paragraph unless the user explicitly requests detail.';
+    }
+
     private async streamGenerate(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
         let replyText = '';
 
@@ -390,19 +531,93 @@ export class ChatService {
         sessionToken: string | undefined,
         userMessage: string,
         onChunk?: (chunk: string) => void,
+        meta: RequestMeta = {},
     ): Promise<{ sessionToken: string; response: ChatResponseDto }> {
-        const { session, topChunks, prompt } = await this.buildPromptAndContext(sessionToken, userMessage);
-        const replyText = await this.streamGenerate(prompt, onChunk);
-        const response = await this.persistAssistantAndBuildResponse(session.id, replyText, topChunks);
+        const requestId = crypto.randomUUID();
+        const turnStart = Date.now();
+        let streamedChunkCount = 0;
 
-        return {
-            sessionToken: session.sessionToken,
-            response,
-        };
+        try {
+            const { session, topChunks, prompt, contextChars, retrievalTelemetry } = await this.buildPromptAndContext(
+                sessionToken,
+                userMessage,
+            );
+
+            const generationStart = Date.now();
+            const replyText = await this.streamGenerate(prompt, (chunk: string) => {
+                streamedChunkCount += 1;
+                if (onChunk) {
+                    onChunk(chunk);
+                }
+            });
+            const generationMs = Date.now() - generationStart;
+
+            const persistenceStart = Date.now();
+            const response = await this.persistAssistantAndBuildResponse(session.id, replyText, topChunks);
+            const persistenceMs = Date.now() - persistenceStart;
+
+            await this.evaluationLogger.logTurn({
+                timestamp: new Date().toISOString(),
+                requestId,
+                sessionToken: session.sessionToken,
+                channel: meta.channel ?? 'unknown',
+                clientId: meta.clientId,
+                questionLength: userMessage.length,
+                replyLength: replyText.length,
+                streamedChunkCount,
+                contextChars,
+                citationCount: response.citations?.length ?? 0,
+                turnLatencyMs: Date.now() - turnStart,
+                generationMs,
+                persistenceMs,
+                retrieval: retrievalTelemetry,
+                success: true,
+            });
+
+            return {
+                sessionToken: session.sessionToken,
+                response,
+            };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown chat error';
+
+            await this.evaluationLogger.logTurn({
+                timestamp: new Date().toISOString(),
+                requestId,
+                sessionToken: sessionToken ?? 'unknown',
+                channel: meta.channel ?? 'unknown',
+                clientId: meta.clientId,
+                questionLength: userMessage.length,
+                replyLength: 0,
+                streamedChunkCount,
+                contextChars: 0,
+                citationCount: 0,
+                turnLatencyMs: Date.now() - turnStart,
+                generationMs: 0,
+                persistenceMs: 0,
+                retrieval: {
+                    mode: this.enableMultiQueryFusion ? 'fusion' : 'single',
+                    variantCount: 0,
+                    successfulVariantCount: 0,
+                    fallbackUsed: true,
+                    variantGenerationMs: 0,
+                    embeddingMs: 0,
+                    searchMs: 0,
+                    fusionMs: 0,
+                    retrievalMs: 0,
+                    topChunkIds: [],
+                    topChunkSimilarities: [],
+                },
+                success: false,
+                errorMessage: message,
+            });
+
+            throw error;
+        }
     }
 
     async handleUserMessage(sessionToken: string | undefined, userMessage: string): Promise<ChatResponseDto> {
-        const streamResult = await this.handleUserMessageStream(sessionToken, userMessage);
+        const streamResult = await this.handleUserMessageStream(sessionToken, userMessage, undefined, { channel: 'http' });
         return streamResult.response;
     }
 }

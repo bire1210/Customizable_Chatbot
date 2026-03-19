@@ -15,6 +15,9 @@ type RetrievedChunk = {
 type FusionOptions = {
     topK?: number;
     variantWeights?: number[];
+    perDocumentCap?: number;
+    diversityLambda?: number;
+    candidateMultiplier?: number;
 };
 
 @Injectable()
@@ -166,6 +169,9 @@ export class VectorService {
     fuseMultiQueryResults(resultSets: RetrievedChunk[][], options: FusionOptions = {}): RetrievedChunk[] {
         const topK = options.topK ?? 6;
         const variantWeights = options.variantWeights ?? [];
+        const perDocumentCap = options.perDocumentCap ?? 2;
+        const diversityLambda = options.diversityLambda ?? 0.65;
+        const candidateMultiplier = options.candidateMultiplier ?? 4;
         const merged = new Map<string, RetrievedChunk>();
 
         for (let setIndex = 0; setIndex < resultSets.length; setIndex++) {
@@ -192,9 +198,10 @@ export class VectorService {
             }
         }
 
-        return [...merged.values()]
-            .sort((a, b) => b.score - a.score)
-            .slice(0, topK);
+        const ranked = [...merged.values()].sort((a, b) => b.score - a.score);
+        const shortlisted = ranked.slice(0, Math.max(topK, topK * candidateMultiplier));
+
+        return this.selectDiverseTopChunks(shortlisted, topK, perDocumentCap, diversityLambda);
     }
 
     private defaultVariantWeight(index: number) {
@@ -207,6 +214,95 @@ export class VectorService {
         }
 
         return 0.7;
+    }
+
+    private selectDiverseTopChunks(
+        candidates: RetrievedChunk[],
+        topK: number,
+        perDocumentCap: number,
+        diversityLambda: number,
+    ) {
+        const selected: RetrievedChunk[] = [];
+        const remaining = [...candidates];
+        const docCounts = new Map<string, number>();
+
+        while (selected.length < topK && remaining.length > 0) {
+            let bestIndex = -1;
+            let bestScore = Number.NEGATIVE_INFINITY;
+
+            for (let i = 0; i < remaining.length; i++) {
+                const candidate = remaining[i];
+                const usedFromDoc = docCounts.get(candidate.documentId) ?? 0;
+                if (usedFromDoc >= perDocumentCap) {
+                    continue;
+                }
+
+                const redundancyPenalty = selected.length
+                    ? Math.max(...selected.map((item) => this.textOverlap(candidate.content, item.content)))
+                    : 0;
+
+                const mmrScore = diversityLambda * candidate.score - (1 - diversityLambda) * redundancyPenalty;
+
+                if (mmrScore > bestScore) {
+                    bestScore = mmrScore;
+                    bestIndex = i;
+                }
+            }
+
+            if (bestIndex < 0) {
+                break;
+            }
+
+            const [chosen] = remaining.splice(bestIndex, 1);
+            selected.push(chosen);
+            docCounts.set(chosen.documentId, (docCounts.get(chosen.documentId) ?? 0) + 1);
+        }
+
+        if (selected.length >= topK) {
+            return selected;
+        }
+
+        for (const candidate of remaining) {
+            if (selected.length >= topK) {
+                break;
+            }
+            selected.push(candidate);
+        }
+
+        return selected;
+    }
+
+    private textOverlap(a: string, b: string) {
+        const aTerms = this.normalizeTerms(a);
+        const bTerms = this.normalizeTerms(b);
+
+        if (!aTerms.size || !bTerms.size) {
+            return 0;
+        }
+
+        let intersection = 0;
+        for (const term of aTerms) {
+            if (bTerms.has(term)) {
+                intersection += 1;
+            }
+        }
+
+        const union = aTerms.size + bTerms.size - intersection;
+        if (!union) {
+            return 0;
+        }
+
+        return intersection / union;
+    }
+
+    private normalizeTerms(input: string) {
+        return new Set(
+            input
+                .toLowerCase()
+                .split(/[^a-z0-9_]+/)
+                .filter((token) => token.length >= 3)
+                .slice(0, 120),
+        );
     }
 }
 
