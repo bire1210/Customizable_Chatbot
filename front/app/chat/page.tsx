@@ -3,10 +3,12 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import { ChatCitation, useChatSessionStore } from "@/stores/chat-session-store";
+import { useToast } from "@/app/components/toast-provider";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:5000";
 
 export default function ChatPage() {
+  const toast = useToast();
   const [socket, setSocket] = useState<Socket | null>(null);
   const [status, setStatus] = useState("connecting");
   const [input, setInput] = useState("");
@@ -33,9 +35,18 @@ export default function ChatPage() {
       autoConnect: true,
     });
 
-    s.on("connect", () => setStatus("connected"));
-    s.on("disconnect", () => setStatus("disconnected"));
-    s.on("connect_error", () => setStatus("error"));
+    s.on("connect", () => {
+      setStatus("connected");
+      toast.success("Connected to chat server.", 1800);
+    });
+    s.on("disconnect", () => {
+      setStatus("disconnected");
+      toast.warning("Disconnected from chat server.");
+    });
+    s.on("connect_error", () => {
+      setStatus("error");
+      toast.error("Could not connect to chat server.");
+    });
 
     s.on("chat-start", (payload: { sessionToken?: string | null }) => {
       setIsStreaming(true);
@@ -64,7 +75,9 @@ export default function ChatPage() {
 
     s.on("chat-error", (payload: { message?: string }) => {
       setIsStreaming(false);
-      addAssistantError(payload?.message ?? "Unknown streaming error");
+      const message = payload?.message ?? "Unknown streaming error";
+      addAssistantError(message);
+      toast.error(message);
     });
 
     setSocket(s);
@@ -86,7 +99,12 @@ export default function ChatPage() {
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!socket || !input.trim() || isStreaming) return;
+    if (!socket || isStreaming || !input.trim()) {
+      if (!socket) {
+        toast.warning("Socket is not connected yet.");
+      }
+      return;
+    }
 
     const text = input.trim();
     setInput("");
@@ -137,8 +155,19 @@ export default function ChatPage() {
             onChange={(e) => setInput(e.target.value)}
             placeholder="Message your assistant"
           />
-          <button type="submit" disabled={!socket || isStreaming || !input.trim()}>
-            {isStreaming ? "Streaming" : "Send"}
+          <button
+            type="submit"
+            disabled={!socket || isStreaming || !input.trim()}
+            className={isStreaming ? "btn-loading" : undefined}
+          >
+            {isStreaming ? (
+              <>
+                <span className="btn-spinner" aria-hidden="true" />
+                Sending...
+              </>
+            ) : (
+              "Send"
+            )}
           </button>
         </form>
       </main>

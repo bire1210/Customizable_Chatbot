@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useToast } from "@/app/components/toast-provider";
 
 type Doc = { id: string; title: string; filename: string; createdAt: string };
 type User = { id: string; email: string; name?: string; role: "ADMIN" | "USER" };
@@ -42,6 +43,7 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:500
 
 export default function AdminPage() {
   const router = useRouter();
+  const toast = useToast();
   const [token, setToken] = useState<string | null>(null);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -55,6 +57,12 @@ export default function AdminPage() {
   const [evalSummary, setEvalSummary] = useState<EvaluationSummary | null>(null);
   const [evalDays, setEvalDays] = useState(7);
   const [evalLoading, setEvalLoading] = useState(false);
+  const [refreshingAll, setRefreshingAll] = useState(false);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [deletingDocs, setDeletingDocs] = useState<Record<string, boolean>>({});
+  const [deletingUsers, setDeletingUsers] = useState<Record<string, boolean>>({});
+  const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem("admin_token");
@@ -72,6 +80,7 @@ export default function AdminPage() {
   }, [token]);
 
   async function refreshAll(authToken: string) {
+    setRefreshingAll(true);
     try {
       const [docsRes, usersRes] = await Promise.all([
         fetch(`${BACKEND_URL}/documents`, {
@@ -84,15 +93,34 @@ export default function AdminPage() {
 
       if (docsRes.ok) {
         setDocs(await docsRes.json());
+      } else {
+        toast.error(`Failed to load documents: ${await parseError(docsRes)}`);
       }
 
       if (usersRes.ok) {
         setUsers(await usersRes.json());
+      } else {
+        toast.error(`Failed to load users: ${await parseError(usersRes)}`);
       }
 
       await refreshEvaluation(authToken, evalDays);
     } catch {
       setMessage("Failed to fetch admin data");
+      toast.error("Failed to fetch admin data");
+    } finally {
+      setRefreshingAll(false);
+    }
+  }
+
+  async function parseError(response: Response) {
+    try {
+      const payload = await response.json();
+      if (Array.isArray(payload?.message)) {
+        return payload.message.join(", ");
+      }
+      return String(payload?.message ?? payload?.error ?? response.statusText ?? "Unknown error");
+    } catch {
+      return response.statusText || "Unknown error";
     }
   }
 
@@ -105,11 +133,14 @@ export default function AdminPage() {
 
       if (!res.ok) {
         setMessage("Failed to load evaluation metrics");
+        toast.error(`Failed to load evaluation metrics: ${await parseError(res)}`);
         return;
       }
 
       const summary = (await res.json()) as EvaluationSummary;
       setEvalSummary(summary);
+    } catch {
+      toast.error("Failed to load evaluation metrics due to network error");
     } finally {
       setEvalLoading(false);
     }
@@ -118,96 +149,138 @@ export default function AdminPage() {
   async function uploadDocument(e: FormEvent) {
     e.preventDefault();
     if (!token || !docFile) return;
+    setUploadingDoc(true);
 
     const form = new FormData();
     form.append("file", docFile);
     if (docTitle.trim()) form.append("title", docTitle.trim());
 
-    const res = await fetch(`${BACKEND_URL}/documents/upload`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
+    try {
+      const res = await fetch(`${BACKEND_URL}/documents/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
 
-    if (!res.ok) {
-      setMessage("Document upload failed");
-      return;
+      if (!res.ok) {
+        const detail = await parseError(res);
+        setMessage("Document upload failed");
+        toast.error(`Document upload failed: ${detail}`);
+        return;
+      }
+
+      setMessage("Document uploaded");
+      toast.success("Document uploaded and ingested");
+      setDocTitle("");
+      setDocFile(null);
+      await refreshAll(token);
+    } catch {
+      toast.error("Document upload failed due to network error");
+    } finally {
+      setUploadingDoc(false);
     }
-
-    setMessage("Document uploaded");
-    setDocTitle("");
-    setDocFile(null);
-    await refreshAll(token);
   }
 
   async function deleteDocument(id: string) {
     if (!token) return;
+    setDeletingDocs((current) => ({ ...current, [id]: true }));
 
-    const res = await fetch(`${BACKEND_URL}/documents/${id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    try {
+      const res = await fetch(`${BACKEND_URL}/documents/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
-    if (!res.ok) {
-      setMessage("Failed to delete document");
-      return;
+      if (!res.ok) {
+        const detail = await parseError(res);
+        setMessage("Failed to delete document");
+        toast.error(`Failed to delete document: ${detail}`);
+        return;
+      }
+
+      setMessage("Document deleted");
+      toast.success("Document deleted");
+      await refreshAll(token);
+    } catch {
+      toast.error("Failed to delete document due to network error");
+    } finally {
+      setDeletingDocs((current) => ({ ...current, [id]: false }));
     }
-
-    setMessage("Document deleted");
-    await refreshAll(token);
   }
 
   async function createUser(e: FormEvent) {
     e.preventDefault();
     if (!token) return;
+    setCreatingUser(true);
 
-    const res = await fetch(`${BACKEND_URL}/users`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        email: userEmail,
-        password: userPassword,
-        name: userName || undefined,
-        role: userRole,
-      }),
-    });
+    try {
+      const res = await fetch(`${BACKEND_URL}/users`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          email: userEmail,
+          password: userPassword,
+          name: userName || undefined,
+          role: userRole,
+        }),
+      });
 
-    if (!res.ok) {
-      setMessage("Failed to create user");
-      return;
+      if (!res.ok) {
+        const detail = await parseError(res);
+        setMessage("Failed to create user");
+        toast.error(`Failed to create user: ${detail}`);
+        return;
+      }
+
+      setMessage("User created");
+      toast.success("User created");
+      setUserEmail("");
+      setUserPassword("");
+      setUserName("");
+      setUserRole("USER");
+      await refreshAll(token);
+    } catch {
+      toast.error("Failed to create user due to network error");
+    } finally {
+      setCreatingUser(false);
     }
-
-    setMessage("User created");
-    setUserEmail("");
-    setUserPassword("");
-    setUserName("");
-    setUserRole("USER");
-    await refreshAll(token);
   }
 
   async function deleteUser(id: string) {
     if (!token) return;
+    setDeletingUsers((current) => ({ ...current, [id]: true }));
 
-    const res = await fetch(`${BACKEND_URL}/users/${id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    try {
+      const res = await fetch(`${BACKEND_URL}/users/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
-    if (!res.ok) {
-      setMessage("Failed to delete user");
-      return;
+      if (!res.ok) {
+        const detail = await parseError(res);
+        setMessage("Failed to delete user");
+        toast.error(`Failed to delete user: ${detail}`);
+        return;
+      }
+
+      setMessage("User deleted");
+      toast.success("User deleted");
+      await refreshAll(token);
+    } catch {
+      toast.error("Failed to delete user due to network error");
+    } finally {
+      setDeletingUsers((current) => ({ ...current, [id]: false }));
     }
-
-    setMessage("User deleted");
-    await refreshAll(token);
   }
 
   function logout() {
+    setLoggingOut(true);
     localStorage.removeItem("admin_token");
     localStorage.removeItem("admin_user");
+    toast.info("Logged out");
     router.push("/login");
   }
 
@@ -236,7 +309,16 @@ export default function AdminPage() {
         </div>
         <div className="admin-actions">
           <a href="/chat">Open chat</a>
-          <button onClick={logout}>Logout</button>
+          <button onClick={logout} disabled={loggingOut} className={loggingOut ? "btn-loading" : undefined}>
+            {loggingOut ? (
+              <>
+                <span className="btn-spinner" aria-hidden="true" />
+                Logging out...
+              </>
+            ) : (
+              "Logout"
+            )}
+          </button>
         </div>
       </header>
 
@@ -253,6 +335,7 @@ export default function AdminPage() {
               Window
               <select
                 value={evalDays}
+                disabled={evalLoading || refreshingAll}
                 onChange={(e) => {
                   const days = Number(e.target.value);
                   setEvalDays(days);
@@ -267,8 +350,19 @@ export default function AdminPage() {
                 <option value={30}>30 days</option>
               </select>
             </label>
-            <button onClick={() => token && void refreshEvaluation(token, evalDays)} disabled={evalLoading}>
-              {evalLoading ? "Refreshing..." : "Refresh"}
+            <button
+              onClick={() => token && void refreshEvaluation(token, evalDays)}
+              disabled={evalLoading || refreshingAll}
+              className={evalLoading ? "btn-loading" : undefined}
+            >
+              {evalLoading ? (
+                <>
+                  <span className="btn-spinner" aria-hidden="true" />
+                  Refreshing...
+                </>
+              ) : (
+                "Refresh"
+              )}
             </button>
           </div>
         </div>
@@ -341,7 +435,20 @@ export default function AdminPage() {
               onChange={(e) => setDocFile(e.target.files?.[0] ?? null)}
               required
             />
-            <button type="submit">Upload and ingest</button>
+            <button
+              type="submit"
+              disabled={uploadingDoc || refreshingAll || !token || !docFile}
+              className={uploadingDoc ? "btn-loading" : undefined}
+            >
+              {uploadingDoc ? (
+                <>
+                  <span className="btn-spinner" aria-hidden="true" />
+                  Uploading...
+                </>
+              ) : (
+                "Upload and ingest"
+              )}
+            </button>
           </form>
 
           <h3>Documents</h3>
@@ -352,7 +459,20 @@ export default function AdminPage() {
                   <strong>{doc.title}</strong>
                   <small>{doc.filename}</small>
                 </div>
-                <button onClick={() => deleteDocument(doc.id)}>Delete</button>
+                <button
+                  onClick={() => deleteDocument(doc.id)}
+                  disabled={Boolean(deletingDocs[doc.id]) || refreshingAll}
+                  className={deletingDocs[doc.id] ? "btn-loading" : undefined}
+                >
+                  {deletingDocs[doc.id] ? (
+                    <>
+                      <span className="btn-spinner" aria-hidden="true" />
+                      Deleting...
+                    </>
+                  ) : (
+                    "Delete"
+                  )}
+                </button>
               </div>
             ))}
             {docs.length === 0 ? <p>No documents</p> : null}
@@ -369,7 +489,20 @@ export default function AdminPage() {
               <option value="USER">USER</option>
               <option value="ADMIN">ADMIN</option>
             </select>
-            <button type="submit">Create user</button>
+            <button
+              type="submit"
+              disabled={creatingUser || refreshingAll || !token}
+              className={creatingUser ? "btn-loading" : undefined}
+            >
+              {creatingUser ? (
+                <>
+                  <span className="btn-spinner" aria-hidden="true" />
+                  Creating...
+                </>
+              ) : (
+                "Create user"
+              )}
+            </button>
           </form>
 
           <h3>Users</h3>
@@ -380,7 +513,20 @@ export default function AdminPage() {
                   <strong>{user.email}</strong>
                   <small>{user.role}{user.name ? ` | ${user.name}` : ""}</small>
                 </div>
-                <button onClick={() => deleteUser(user.id)}>Delete</button>
+                <button
+                  onClick={() => deleteUser(user.id)}
+                  disabled={Boolean(deletingUsers[user.id]) || refreshingAll}
+                  className={deletingUsers[user.id] ? "btn-loading" : undefined}
+                >
+                  {deletingUsers[user.id] ? (
+                    <>
+                      <span className="btn-spinner" aria-hidden="true" />
+                      Deleting...
+                    </>
+                  ) : (
+                    "Delete"
+                  )}
+                </button>
               </div>
             ))}
             {users.length === 0 ? <p>No users</p> : null}
