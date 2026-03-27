@@ -2,11 +2,13 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useToast } from "@/app/components/toast-provider";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:5000";
 
 export default function LoginPage() {
   const router = useRouter();
+  const toast = useToast();
   const [email, setEmail] = useState("admin@gmail.com");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -36,10 +38,13 @@ export default function LoginPage() {
         JSON.stringify({ id: payload.id, email: payload.email, role: payload.role, name: payload.name }),
       );
 
+      toast.success("Login successful. Welcome back.");
+
       router.push("/admin");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Login failed";
       setError(message);
+      toast.error(message === "Unauthorized" ? "Wrong email or password." : message);
     } finally {
       setLoading(false);
     }
@@ -59,8 +64,15 @@ export default function LoginPage() {
 
         {error ? <div className="error-text">{error}</div> : null}
 
-        <button type="submit" disabled={loading}>
-          {loading ? "Signing in..." : "Sign in"}
+        <button type="submit" disabled={loading} className={loading ? "btn-loading" : undefined}>
+          {loading ? (
+            <>
+              <span className="btn-spinner" aria-hidden="true" />
+              Signing in...
+            </>
+          ) : (
+            "Sign in"
+          )}
         </button>
 
         <a href="/chat" className="link-muted">Back to chat</a>

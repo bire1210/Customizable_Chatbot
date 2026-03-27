@@ -172,11 +172,119 @@ a {
   color: #fff;
   border-color: var(--accent);
   cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease, filter 0.15s ease;
 }
 
-.chat-input button:disabled {
+.chat-input button:disabled,
+.auth-card button:disabled,
+.stack-form button:disabled,
+.admin-actions button:disabled,
+.row button:disabled {
   opacity: 0.65;
   cursor: not-allowed;
+  filter: saturate(0.8);
+}
+
+.chat-input button:not(:disabled):active,
+.auth-card button:not(:disabled):active,
+.stack-form button:not(:disabled):active,
+.admin-actions button:not(:disabled):active,
+.row button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+.btn-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.btn-spinner {
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #ffffff;
+  animation: btn-spin 0.7s linear infinite;
+}
+
+@keyframes btn-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.toast-viewport {
+  position: fixed;
+  right: 1rem;
+  top: 1rem;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  width: min(420px, 92vw);
+}
+
+.toast {
+  border: 1px solid var(--line);
+  border-left-width: 5px;
+  border-radius: 12px;
+  background: #fffefb;
+  box-shadow: 0 8px 22px rgba(24, 33, 31, 0.14);
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  animation: toast-in 0.18s ease;
+}
+
+.toast p {
+  font-size: 0.88rem;
+  line-height: 1.35;
+}
+
+.toast button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--muted);
+  background: #f8f6ef;
+  cursor: pointer;
+}
+
+.toast-success {
+  border-left-color: #2f7f60;
+}
+
+.toast-error {
+  border-left-color: #a43a2f;
+}
+
+.toast-info {
+  border-left-color: #34579b;
+}
+
+.toast-warning {
+  border-left-color: #ab7c29;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .auth-shell {
