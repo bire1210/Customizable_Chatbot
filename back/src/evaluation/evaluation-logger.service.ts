@@ -32,6 +32,9 @@ export type TurnEvaluationEvent = {
   persistenceMs: number;
   retrieval: RetrievalTelemetry;
   success: boolean;
+  constraintRequested?: boolean;
+  constraintPass?: boolean;
+  generationRetried?: boolean;
   errorMessage?: string;
 };
 

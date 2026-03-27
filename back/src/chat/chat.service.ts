@@ -13,6 +13,12 @@ type RequestMeta = {
     clientId?: string;
 };
 
+type OutputConstraint = {
+    requestedCount?: number;
+    listRequired: boolean;
+    topicKeywords: string[];
+};
+
 @Injectable()
 export class ChatService {
     private readonly generate_url = 'http://localhost:11434/api/generate';
@@ -25,6 +31,7 @@ export class ChatService {
     private readonly maxPredictTokens = 1400;
     private readonly enableMultiQueryFusion = process.env.ENABLE_MULTI_QUERY_FUSION !== 'false';
     private readonly retrievalCandidatePool = Number(process.env.RETRIEVAL_CANDIDATE_POOL ?? 40);
+    private readonly countHintTerms = ['example', 'examples', 'types', 'ways', 'steps', 'patterns', 'reasons'];
 
     constructor(
         private vector: VectorService,
@@ -97,6 +104,8 @@ export class ChatService {
             .join('\n');
 
         const responseStyleGuide = this.buildResponseStyleGuide(userMessage);
+        const constraint = this.extractOutputConstraint(userMessage);
+        const constraintInstruction = this.buildConstraintInstruction(constraint);
 
         const prompt = `You are an assistant for document-grounded Q&A.
     Rules:
@@ -104,6 +113,7 @@ export class ChatService {
     2) If context is partial, provide concise general guidance and clearly state what is uncertain.
     3) ${responseStyleGuide}
     4) Never repeat phrases.
+    5) ${constraintInstruction}
 
     Conversation:
     ${conversation}
@@ -121,6 +131,7 @@ export class ChatService {
             hasReliableContext,
             contextChars: contextText.length,
             retrievalTelemetry: retrieval.telemetry,
+            constraint,
         };
     }
 
@@ -411,6 +422,134 @@ export class ChatService {
         return 'Keep output brief: max 6 bullet points or 1 short paragraph unless the user explicitly requests detail.';
     }
 
+    private extractOutputConstraint(userMessage: string): OutputConstraint {
+        const normalized = userMessage.toLowerCase();
+        const requestedCount = this.extractRequestedCount(normalized);
+        const asksForList = /(list|examples|example|types|ways|steps|patterns|give me)/.test(normalized);
+        const topicKeywords = this.extractTopicKeywords(normalized);
+
+        return {
+            requestedCount,
+            listRequired: asksForList || typeof requestedCount === 'number',
+            topicKeywords,
+        };
+    }
+
+    private extractRequestedCount(normalizedMessage: string) {
+        const countRegex = new RegExp(`(\\d+)\\s+(${this.countHintTerms.join('|')})`);
+        const match = normalizedMessage.match(countRegex);
+        if (!match) {
+            return undefined;
+        }
+
+        const parsed = Number(match[1]);
+        if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 20) {
+            return undefined;
+        }
+
+        return parsed;
+    }
+
+    private extractTopicKeywords(normalizedMessage: string) {
+        const stopWords = new Set([
+            'the', 'and', 'for', 'with', 'from', 'that', 'this', 'those', 'these', 'into', 'about', 'what',
+            'when', 'where', 'which', 'would', 'could', 'should', 'have', 'has', 'had', 'them', 'they',
+            'give', 'show', 'tell', 'please', 'need', 'want', 'make', 'like', 'just', 'more', 'how', 'why',
+            'can', 'you', 'your', 'our', 'are', 'is', 'was', 'were', 'write', 'explain',
+        ]);
+
+        const tokens = normalizedMessage
+            .split(/[^a-z0-9_]+/)
+            .map((token) => token.trim())
+            .filter((token) => token.length >= 4 && !stopWords.has(token));
+
+        return [...new Set(tokens)].slice(0, 5);
+    }
+
+    private buildConstraintInstruction(constraint: OutputConstraint) {
+        const listLine = constraint.listRequired
+            ? 'Return a clear numbered list where each item is distinct.'
+            : 'No strict list format is required.';
+
+        const countLine = typeof constraint.requestedCount === 'number'
+            ? `Return exactly ${constraint.requestedCount} items.`
+            : 'Do not invent an arbitrary item count.';
+
+        const topicLine = constraint.topicKeywords.length
+            ? `Keep every item on-topic for: ${constraint.topicKeywords.join(', ')}.`
+            : 'Keep the answer aligned with the user request.';
+
+        return `${listLine} ${countLine} ${topicLine}`;
+    }
+
+    private validateReplyAgainstConstraint(replyText: string, constraint: OutputConstraint) {
+        if (!replyText.trim()) {
+            return false;
+        }
+
+        if (constraint.topicKeywords.length) {
+            const lower = replyText.toLowerCase();
+            const hasAnyTopic = constraint.topicKeywords.some((keyword) => lower.includes(keyword));
+            if (!hasAnyTopic) {
+                return false;
+            }
+        }
+
+        if (!constraint.listRequired && typeof constraint.requestedCount !== 'number') {
+            return true;
+        }
+
+        const itemCount = this.countListItems(replyText);
+        if (typeof constraint.requestedCount === 'number') {
+            return itemCount === constraint.requestedCount;
+        }
+
+        return itemCount >= 2;
+    }
+
+    private countListItems(replyText: string) {
+        const lines = replyText
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean);
+
+        const listLineCount = lines.filter((line) => /^(\d+[.)]|[-*])\s+/.test(line)).length;
+        if (listLineCount > 0) {
+            return listLineCount;
+        }
+
+        const sentenceCount = replyText
+            .split(/\n{2,}|(?<=[.!?])\s+/)
+            .map((part) => part.trim())
+            .filter((part) => part.length > 0).length;
+
+        return sentenceCount;
+    }
+
+    private async generateWithConstraintGuard(
+        prompt: string,
+        constraint: OutputConstraint,
+        onChunk?: (chunk: string) => void,
+    ) {
+        const firstAttempt = await this.streamGenerate(prompt);
+        if (this.validateReplyAgainstConstraint(firstAttempt, constraint)) {
+            if (onChunk) {
+                onChunk(firstAttempt);
+            }
+            return { replyText: firstAttempt, retried: false, pass: true };
+        }
+
+        const correctivePrompt = `${prompt}\n\nYour previous answer did not follow the exact output constraints. Rewrite now and strictly satisfy all count/format/topic constraints.`;
+        const secondAttempt = await this.streamGenerate(correctivePrompt);
+        const pass = this.validateReplyAgainstConstraint(secondAttempt, constraint);
+
+        if (onChunk) {
+            onChunk(secondAttempt);
+        }
+
+        return { replyText: secondAttempt, retried: true, pass };
+    }
+
     private async streamGenerate(prompt: string, onChunk?: (chunk: string) => void): Promise<string> {
         let replyText = '';
 
@@ -538,18 +677,36 @@ export class ChatService {
         let streamedChunkCount = 0;
 
         try {
-            const { session, topChunks, prompt, contextChars, retrievalTelemetry } = await this.buildPromptAndContext(
+            const { session, topChunks, prompt, contextChars, retrievalTelemetry, constraint } = await this.buildPromptAndContext(
                 sessionToken,
                 userMessage,
             );
 
             const generationStart = Date.now();
-            const replyText = await this.streamGenerate(prompt, (chunk: string) => {
-                streamedChunkCount += 1;
-                if (onChunk) {
-                    onChunk(chunk);
-                }
-            });
+            const requiresGuardedValidation = Boolean(constraint.listRequired || typeof constraint.requestedCount === 'number');
+
+            let replyText = '';
+            let retried = false;
+            let constraintPass = true;
+
+            if (requiresGuardedValidation) {
+                const guarded = await this.generateWithConstraintGuard(prompt, constraint, (chunk: string) => {
+                    streamedChunkCount += 1;
+                    if (onChunk) {
+                        onChunk(chunk);
+                    }
+                });
+                replyText = guarded.replyText;
+                retried = guarded.retried;
+                constraintPass = guarded.pass;
+            } else {
+                replyText = await this.streamGenerate(prompt, (chunk: string) => {
+                    streamedChunkCount += 1;
+                    if (onChunk) {
+                        onChunk(chunk);
+                    }
+                });
+            }
             const generationMs = Date.now() - generationStart;
 
             const persistenceStart = Date.now();
@@ -572,6 +729,9 @@ export class ChatService {
                 persistenceMs,
                 retrieval: retrievalTelemetry,
                 success: true,
+                constraintRequested: requiresGuardedValidation,
+                constraintPass,
+                generationRetried: retried,
             });
 
             return {
@@ -610,6 +770,9 @@ export class ChatService {
                 },
                 success: false,
                 errorMessage: message,
+                constraintRequested: false,
+                constraintPass: false,
+                generationRetried: false,
             });
 
             throw error;
