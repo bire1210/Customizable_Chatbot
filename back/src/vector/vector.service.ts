@@ -248,6 +248,7 @@ export class VectorService {
         const selected: RetrievedChunk[] = [];
         const remaining = [...candidates];
         const docCounts = new Map<string, number>();
+        const maxRelevanceScore = Math.max(...candidates.map((candidate) => candidate.score), 1e-9);
 
         while (selected.length < topK && remaining.length > 0) {
             let bestIndex = -1;
@@ -264,7 +265,8 @@ export class VectorService {
                     ? Math.max(...selected.map((item) => this.textOverlap(candidate.content, item.content)))
                     : 0;
 
-                const mmrScore = diversityLambda * candidate.score - (1 - diversityLambda) * redundancyPenalty;
+                const normalizedRelevance = candidate.score / maxRelevanceScore;
+                const mmrScore = diversityLambda * normalizedRelevance - (1 - diversityLambda) * redundancyPenalty;
 
                 if (mmrScore > bestScore) {
                     bestScore = mmrScore;

@@ -86,4 +86,20 @@ describe('VectorService', () => {
 
     expect(new Set(results.map((item) => item.documentId)).size).toBe(2);
   });
+
+  it('normalizes reciprocal-rank scores before applying the diversity penalty', () => {
+    const candidates = [
+      { id: 'relevant-1', content: 'document formats PDF HTML', documentId: 'readme', chunkIndex: 0, distance: 0.1, similarity: 0.9, score: 0.032 },
+      { id: 'relevant-2', content: 'document formats Markdown TXT', documentId: 'readme', chunkIndex: 1, distance: 0.12, similarity: 0.88, score: 0.031 },
+      { id: 'unrelated', content: 'employment history payroll', documentId: 'cv', chunkIndex: 2, distance: 0.4, similarity: 0.6, score: 0.015 },
+    ];
+
+    const results = service.fuseMultiQueryResults([candidates] as any, {
+      topK: 2,
+      perDocumentCap: 2,
+      diversityLambda: 0.65,
+    });
+
+    expect(results.map((item) => item.id)).toEqual(['relevant-1', 'relevant-2']);
+  });
 });

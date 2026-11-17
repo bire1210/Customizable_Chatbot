@@ -24,7 +24,7 @@ export class ChatService {
     private readonly generate_url = process.env.OLLAMA_GENERATE_URL ?? 'http://localhost:11434/api/generate';
     private readonly model_name = process.env.OLLAMA_GENERATION_MODEL ?? 'phi4-mini';
     private readonly topK = 8;
-    private readonly maxContextChunks = Number(process.env.MAX_CONTEXT_CHUNKS ?? 5);
+    private readonly maxContextChunks = Number(process.env.MAX_CONTEXT_CHUNKS ?? 6);
     private readonly historyWindow = 10;
     private readonly maxContextChars = 9000;
     private readonly maxReplyChars = 6400;
