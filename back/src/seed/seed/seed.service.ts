@@ -19,7 +19,7 @@ export class SeedService {
             },
         });
 
-        console.log(result)
+        return result;
     }
 
 }

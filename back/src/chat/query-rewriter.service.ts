@@ -12,7 +12,8 @@ export class QueryRewriterService {
     'a', 'an', 'the', 'and', 'or', 'but', 'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with', 'from',
     'is', 'are', 'was', 'were', 'be', 'been', 'being', 'it', 'this', 'that', 'these', 'those',
     'can', 'could', 'would', 'should', 'please', 'kindly', 'tell', 'me', 'about', 'my', 'your',
-    'how', 'what', 'why', 'when', 'where', 'who', 'which',
+    'his', 'her', 'their', 'how', 'what', 'why', 'when', 'where', 'who', 'which', 'according',
+    'identify', 'state', 'summarize', 'including', 'include', 'listed', 'provided', 'give', 'all',
   ]);
 
   async rewriteForRetrieval(rawQuery: string): Promise<string> {
@@ -63,11 +64,13 @@ export class QueryRewriterService {
   private applyDeterministicRewrite(input: string): string {
     let rewritten = input;
 
+    rewritten = rewritten.replace(/^according to [^,]+,\s*/i, '');
+
     // Strip common conversational wrappers that add noise but little retrieval value.
-    rewritten = rewritten.replace(
-      /^(hi|hello|hey|please|kindly|can you|could you|would you|i need help with|i want to know|tell me about)\b[:,\-\s]*/i,
-      '',
-    );
+    const wrapper = /^(hi|hello|hey|please|kindly|can you|could you|would you|i need help with|i want to know|tell me about)\b[:,\-\s]*/i;
+    while (wrapper.test(rewritten)) {
+      rewritten = rewritten.replace(wrapper, '');
+    }
 
     rewritten = rewritten.replace(/\b(thanks|thank you|please)\b[.!?\s]*$/i, '').trim();
     rewritten = rewritten.replace(/[\u{1F300}-\u{1FAFF}]/gu, '').trim();

@@ -21,14 +21,15 @@ type OutputConstraint = {
 
 @Injectable()
 export class ChatService {
-    private readonly generate_url = 'http://localhost:11434/api/generate';
-    private readonly model_name = 'phi4-mini';
-    private readonly topK = 5;
+    private readonly generate_url = process.env.OLLAMA_GENERATE_URL ?? 'http://localhost:11434/api/generate';
+    private readonly model_name = process.env.OLLAMA_GENERATION_MODEL ?? 'phi4-mini';
+    private readonly topK = 8;
+    private readonly maxContextChunks = Number(process.env.MAX_CONTEXT_CHUNKS ?? 5);
     private readonly historyWindow = 10;
     private readonly maxContextChars = 9000;
-    private readonly minSimilarity = 0.52;
     private readonly maxReplyChars = 6400;
     private readonly maxPredictTokens = 1400;
+    private readonly generationTemperature = Number(process.env.OLLAMA_TEMPERATURE ?? 0);
     private readonly enableMultiQueryFusion = process.env.ENABLE_MULTI_QUERY_FUSION !== 'false';
     private readonly retrievalCandidatePool = Number(process.env.RETRIEVAL_CANDIDATE_POOL ?? 40);
     private readonly countHintTerms = ['example', 'examples', 'types', 'ways', 'steps', 'patterns', 'reasons'];
@@ -72,17 +73,15 @@ export class ChatService {
 
         const retrieval = await this.retrieveWithContextFusion(userMessage);
         const topChunks = retrieval.topChunks;
-        const reliableChunks = topChunks.filter((chunk) => chunk.similarity >= this.minSimilarity);
-        const chunksForContext = reliableChunks.length ? reliableChunks : topChunks.slice(0, 2);
-        const expandedContexts = await this.expandContexts(chunksForContext, 1);
-        const hasReliableContext = reliableChunks.length > 0;
+        const chunksForContext = this.rankChunksForContext(userMessage, topChunks)
+            .slice(0, this.maxContextChunks);
+        const hasReliableContext = chunksForContext.length > 0;
 
-        const contextText = expandedContexts.length
+        const contextText = chunksForContext.length
             ? this.limitContext(
-            expandedContexts
-                  .map((item) => {
-                      const similarity = item.similarity.toFixed(3);
-                      return `[document=${item.documentId} chunk=${item.chunkIndex} similarity=${similarity}]\n${item.content}`;
+            chunksForContext
+                  .map((item, index) => {
+                      return `[Source ${index + 1}]\n${item.content}`;
                   })
                   .join('\n\n---\n\n'),
               )
@@ -109,11 +108,14 @@ export class ChatService {
 
         const prompt = `You are an assistant for document-grounded Q&A.
     Rules:
-    1) Prioritize the provided context first.
-    2) If context is partial, provide concise general guidance and clearly state what is uncertain.
-    3) ${responseStyleGuide}
-    4) Never repeat phrases.
-    5) ${constraintInstruction}
+    1) Answer only with facts supported by the provided context. Do not add general knowledge or infer missing facts.
+    2) Check every source excerpt before deciding a fact is absent. If the requested fact is absent, say that it was not found in the provided documents.
+    3) Keep facts from different people, jobs, projects, and documents separate. Never substitute a metric from another project.
+    4) Do not mention internal document IDs, chunk IDs, similarity scores, or retrieval metadata.
+    5) Answer every part of a multi-part question. Copy numbers exactly and keep each value attached to its correct label.
+    6) Answer the user's question directly. ${responseStyleGuide}
+    7) Never repeat phrases.
+    8) ${constraintInstruction}
 
     Conversation:
     ${conversation}
@@ -129,6 +131,7 @@ export class ChatService {
             topChunks,
             prompt,
             hasReliableContext,
+            contextText,
             contextChars: contextText.length,
             retrievalTelemetry: retrieval.telemetry,
             constraint,
@@ -226,7 +229,7 @@ export class ChatService {
             const fusionStart = Date.now();
             const topChunks = this.vector.fuseMultiQueryResults(successfulResults, {
                 topK: this.topK,
-                perDocumentCap: 2,
+                perDocumentCap: 4,
                 diversityLambda: 0.65,
                 candidateMultiplier: 4,
             });
@@ -307,99 +310,51 @@ export class ChatService {
         };
     }
 
-    private async expandContexts(topChunks: any[], window = 1) {
-        if (!topChunks.length) {
-            return [];
+    private rankChunksForContext(userMessage: string, chunks: any[]) {
+        if (chunks.length < 2) {
+            return chunks;
         }
 
-        const grouped = new Map<string, { start: number; end: number; similarity: number; chunkIndex: number }[]>();
-
-        for (const chunk of topChunks) {
-            const ranges = grouped.get(chunk.documentId) ?? [];
-            ranges.push({
-                start: Math.max(0, chunk.chunkIndex - window),
-                end: chunk.chunkIndex + window,
-                similarity: chunk.similarity,
-                chunkIndex: chunk.chunkIndex,
-            });
-            grouped.set(chunk.documentId, ranges);
+        const queryTerms = this.contextRankingTerms(userMessage);
+        if (!queryTerms.length) {
+            return chunks;
         }
 
-        const contextBlocks: any[] = [];
-
-        for (const [documentId, ranges] of grouped.entries()) {
-            const mergedRanges = this.mergeRanges(ranges);
-
-            for (const range of mergedRanges) {
-                const neighbors = await this.prisma.$queryRawUnsafe<any[]>(
-                    `
-                    SELECT id, content, "documentId", "chunkIndex"
-                    FROM "DocumentChunk"
-                    WHERE "documentId" = $1
-                      AND "chunkIndex" BETWEEN $2 AND $3
-                    ORDER BY "chunkIndex" ASC
-                    `,
-                    documentId,
-                    range.start,
-                    range.end,
+        return chunks
+            .map((chunk, index) => {
+                const contentTerms = new Set(
+                    String(chunk.content ?? '')
+                        .toLowerCase()
+                        .split(/[^a-z0-9_+]+/)
+                        .filter(Boolean),
                 );
+                const matchedTerms = queryTerms.filter((term) => contentTerms.has(term)).length;
+                const coverage = matchedTerms / queryTerms.length;
+                const retrievalRank = (chunks.length - index) / chunks.length;
 
-                if (!neighbors.length) {
-                    continue;
-                }
-
-                contextBlocks.push({
-                    id: neighbors[0].id,
-                    documentId,
-                    chunkIndex: range.chunkIndex,
-                    distance: 1 - range.similarity,
-                    similarity: range.similarity,
-                    content: neighbors.map((row) => row.content).join('\n\n'),
-                });
-            }
-        }
-
-        const deduped = new Map<string, any>();
-        for (const block of contextBlocks) {
-            const key = `${block.documentId}:${block.content}`;
-            const existing = deduped.get(key);
-            if (!existing || existing.similarity < block.similarity) {
-                deduped.set(key, block);
-            }
-        }
-
-        return [...deduped.values()].sort((a, b) => b.similarity - a.similarity).slice(0, this.topK);
+                return {
+                    chunk,
+                    contextScore: (0.45 * retrievalRank) + (0.55 * coverage),
+                };
+            })
+            .sort((a, b) => b.contextScore - a.contextScore)
+            .map((item) => item.chunk);
     }
 
-    private mergeRanges(
-        ranges: Array<{ start: number; end: number; similarity: number; chunkIndex: number }>,
-    ) {
-        const sorted = [...ranges].sort((a, b) => a.start - b.start);
-        if (!sorted.length) {
-            return [];
-        }
+    private contextRankingTerms(userMessage: string) {
+        const stopWords = new Set([
+            'about', 'according', 'all', 'and', 'are', 'did', 'does', 'for', 'from', 'give', 'how',
+            'including', 'into', 'kaleab', 'main', 'provided', 'reported', 'summarize', 'the', 'their',
+            'this', 'was', 'were', 'what', 'which', 'with',
+        ]);
 
-        const merged: Array<{ start: number; end: number; similarity: number; chunkIndex: number }> = [
-            { ...sorted[0] },
-        ];
-
-        for (let i = 1; i < sorted.length; i++) {
-            const current = sorted[i];
-            const last = merged[merged.length - 1];
-
-            if (current.start <= last.end + 1) {
-                last.end = Math.max(last.end, current.end);
-                if (current.similarity > last.similarity) {
-                    last.similarity = current.similarity;
-                    last.chunkIndex = current.chunkIndex;
-                }
-                continue;
-            }
-
-            merged.push({ ...current });
-        }
-
-        return merged;
+        return [...new Set(
+            userMessage
+                .toLowerCase()
+                .split(/[^a-z0-9_+]+/)
+                .map((term) => term.trim())
+                .filter((term) => term.length >= 3 && !stopWords.has(term)),
+        )];
     }
 
     private limitContext(contextText: string) {
@@ -560,7 +515,7 @@ export class ChatService {
                 stream: true,
                 options: {
                     num_predict: this.maxPredictTokens,
-                    temperature: 0.2,
+                    temperature: this.generationTemperature,
                     repeat_penalty: 1.2,
                     top_p: 0.9,
                     stop: ['\nUser:', '\nUSER:', '\nSystem:'],
@@ -666,6 +621,37 @@ export class ChatService {
         }
     }
 
+    private shouldVerifyGrounding(userMessage: string) {
+        return /\b(all|including|include|scores?|results?|sizes?|status|contributions?|responsibilities|workflows?|grades?|mother tongue|formats?|technologies|languages?|levels?|models?|learners?|constraints?|workaround|stack|approach)\b/i
+            .test(userMessage);
+    }
+
+    private async generateGroundedAnswer(contextText: string, userMessage: string) {
+        const groundedPrompt = `Answer the question using only the source excerpts below.
+
+SOURCE EXCERPTS:
+${contextText}
+
+QUESTION:
+${userMessage}
+
+Rules:
+1) Answer every requested part, but include only facts clearly tied to the named person, job, project, course, or document.
+2) Do not transfer a date, metric, technology, or responsibility from another subject in the excerpts.
+3) Copy numbers and labels exactly. If a requested fact is absent, say it was not found.
+4) Give the direct answer only. Do not add a preface, review note, source label, or claim that you corrected an earlier answer.`;
+
+        return this.streamGenerate(groundedPrompt);
+    }
+
+    private sanitizeReply(replyText: string) {
+        return replyText
+            .replace(/^\s*According to Source \d+\s*:?\s*/i, '')
+            .replace(/\s*\(Source \d+\)/gi, '')
+            .replace(/\bSource \d+\b/gi, 'the provided document')
+            .trim();
+    }
+
     async handleUserMessageStream(
         sessionToken: string | undefined,
         userMessage: string,
@@ -677,7 +663,7 @@ export class ChatService {
         let streamedChunkCount = 0;
 
         try {
-            const { session, topChunks, prompt, contextChars, retrievalTelemetry, constraint } = await this.buildPromptAndContext(
+            const { session, topChunks, prompt, contextText, contextChars, retrievalTelemetry, constraint } = await this.buildPromptAndContext(
                 sessionToken,
                 userMessage,
             );
@@ -700,13 +686,23 @@ export class ChatService {
                 retried = guarded.retried;
                 constraintPass = guarded.pass;
             } else {
-                replyText = await this.streamGenerate(prompt, (chunk: string) => {
-                    streamedChunkCount += 1;
+                const shouldVerify = this.shouldVerifyGrounding(userMessage);
+                if (shouldVerify) {
+                    replyText = await this.generateGroundedAnswer(contextText, userMessage);
                     if (onChunk) {
-                        onChunk(chunk);
+                        streamedChunkCount += 1;
+                        onChunk(replyText);
                     }
-                });
+                } else {
+                    replyText = await this.streamGenerate(prompt, (chunk: string) => {
+                        streamedChunkCount += 1;
+                        if (onChunk) {
+                            onChunk(chunk);
+                        }
+                    });
+                }
             }
+            replyText = this.sanitizeReply(replyText);
             const generationMs = Date.now() - generationStart;
 
             const persistenceStart = Date.now();

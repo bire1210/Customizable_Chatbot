@@ -22,7 +22,8 @@ type FusionOptions = {
 
 @Injectable()
 export class VectorService {
-    private readonly model_name = 'nomic-embed-text';
+    private readonly model_name = process.env.OLLAMA_EMBEDDING_MODEL ?? 'nomic-embed-text';
+    private readonly ollamaUrl = process.env.OLLAMA_URL ?? 'http://localhost:11434';
     private readonly targetDimension = 768;
     private readonly rrfK = 60;
 
@@ -31,7 +32,7 @@ export class VectorService {
 
     async createSingleTextVector(text: string) {
         try{
-            const response = await axios.post('http://localhost:11434/api/embeddings', {
+            const response = await axios.post(`${this.ollamaUrl}/api/embeddings`, {
                 model: this.model_name,
                 prompt: text,
             });
@@ -52,7 +53,7 @@ export class VectorService {
 
     async createBatchEmbeddings(texts: string[]) {
         try{
-            const response = await axios.post('http://localhost:11434/api/embed', {
+            const response = await axios.post(`${this.ollamaUrl}/api/embed`, {
                 model: this.model_name,
                 input: texts,
             });
@@ -109,6 +110,11 @@ export class VectorService {
     }
 
     async searchKeywordChunks(query: string, limit = 20) {
+        const tsQuery = this.buildKeywordTsQuery(query);
+        if (!tsQuery) {
+            return [];
+        }
+
         const result = await this.prisma.$queryRawUnsafe<
             { id: string; content: string; documentId: string; chunkIndex: number; rank: number }[]
         >(
@@ -118,13 +124,13 @@ export class VectorService {
               content,
               "documentId",
               "chunkIndex",
-              ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', $1)) AS rank
+              ts_rank_cd(to_tsvector('english', content), to_tsquery('english', $1)) AS rank
             FROM "DocumentChunk"
-            WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
+            WHERE to_tsvector('english', content) @@ to_tsquery('english', $1)
             ORDER BY rank DESC
             LIMIT $2
             `,
-            query,
+            tsQuery,
             limit,
         );
 
@@ -137,6 +143,23 @@ export class VectorService {
             similarity: 0,
             score: 1 / (this.rrfK + index + 1),
         }));
+    }
+
+    private buildKeywordTsQuery(query: string) {
+        const stopWords = new Set([
+            'the', 'and', 'for', 'with', 'from', 'that', 'this', 'what', 'which', 'who', 'how', 'are',
+            'was', 'were', 'according', 'kaleab', 'state', 'give', 'identify', 'summarize', 'including',
+            'include', 'all', 'listed', 'provided', 'document', 'documents',
+        ]);
+        const terms = [...new Set(
+            query
+                .toLowerCase()
+                .split(/[^a-z0-9_]+/)
+                .map((term) => term.trim())
+                .filter((term) => term.length >= 3 && !stopWords.has(term)),
+        )].slice(0, 12);
+
+        return terms.map((term) => `${term}:*`).join(' | ');
     }
 
     async searchHybridChunks(query: string, embedding: number[], topK = 6, candidatePool = 20): Promise<RetrievedChunk[]> {

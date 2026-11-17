@@ -167,7 +167,11 @@ export class DocumentsService {
       }));
     }
 
-  chunkText(text: string, chunkSize = 1800, overlap = 240): ChunkDraft[] {
+  chunkText(
+    text: string,
+    chunkSize = Number(process.env.DOCUMENT_CHUNK_SIZE ?? 1000),
+    overlap = Number(process.env.DOCUMENT_CHUNK_OVERLAP ?? 160),
+  ): ChunkDraft[] {
     const prepared = cleanTextForChunking(text);
     const paragraphs = prepared
       .split(/\n{2,}/)
@@ -183,43 +187,49 @@ export class DocumentsService {
   }
 
   private splitParagraph(paragraph: string, chunkSize: number): string[] {
-    if (paragraph.length <= chunkSize) {
-      return [paragraph];
-    }
-
-    const sentenceLike = paragraph
-      .match(/[^.!?\n]+(?:[.!?]+|$)/g)
-      ?.map((part) => part.trim())
+    const lines = paragraph
+      .split(/\n+/)
+      .map((line) => line.trim())
       .filter(Boolean);
 
-    if (!sentenceLike || sentenceLike.length <= 1) {
-      return splitByLength(paragraph, chunkSize);
+    return lines.flatMap((line) => this.splitLine(line, chunkSize));
+  }
+
+  private splitLine(line: string, chunkSize: number): string[] {
+    if (line.length <= chunkSize) {
+      return [line];
     }
 
-    const chunks: string[] = [];
+    const sentences = line
+      .match(/[^.!?]+(?:[.!?]+|$)/g)
+      ?.map((part) => part.trim())
+      .filter(Boolean) ?? [];
+
+    if (sentences.length <= 1) {
+      return splitByLength(line, chunkSize);
+    }
+
+    const units: string[] = [];
     let current = '';
 
-    for (const sentence of sentenceLike) {
-      if (!current) {
-        current = sentence;
-        continue;
-      }
-
-      const candidate = `${current} ${sentence}`;
+    for (const sentence of sentences) {
+      const candidate = current ? `${current} ${sentence}` : sentence;
       if (candidate.length <= chunkSize) {
         current = candidate;
         continue;
       }
 
-      chunks.push(current.trim());
+      if (current) {
+        units.push(current);
+      }
       current = sentence;
     }
 
     if (current) {
-      chunks.push(current.trim());
+      units.push(current);
     }
 
-    return chunks.flatMap((chunk) => (chunk.length <= chunkSize ? [chunk] : splitByLength(chunk, chunkSize)));
+    return units.flatMap((unit) => unit.length <= chunkSize ? [unit] : splitByLength(unit, chunkSize));
   }
 }
 
